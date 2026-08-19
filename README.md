@@ -38,12 +38,7 @@ java SnakeGame
 
 ---
 
-## 2. Packaging into a Windows `.exe`
-
-Java itself doesn't produce `.exe` files, but the JDK's built-in `jpackage`
-tool (bundled with JDK 14+) can wrap your program together with a Java
-runtime into a native Windows installer/executable. Do this step **on a
-Windows machine** (jpackage builds for the OS it's run on).
+## 2. Packaging into a Windows 
 
 ### Prerequisites
 1. Install a JDK on Windows (17 or 21 LTS): https://adoptium.net/
@@ -91,60 +86,3 @@ too — just run the equivalent build on that OS.
 
 ---
 
-## 3. Putting it on GitHub
-
-### One-time setup (if you haven't used Git before)
-1. Install Git: https://git-scm.com/downloads
-2. Create a free GitHub account: https://github.com/join
-3. Set your identity (only needs doing once per machine):
-   ```bash
-   git config --global user.name "Your Name"
-   git config --global user.email "you@example.com"
-   ```
-
-### Create the repository on GitHub
-1. Go to https://github.com/new
-2. Name it something like `snake-game`, leave it **empty** (don't add a
-   README/.gitignore there — we'll push our own), and click **Create
-   repository**. Keep the page open — it shows the remote URL you'll need.
-
-### Push your project
-From your project folder (the one with `SnakeGame.java`, `GameFrame.java`,
-`GamePanel.java`, this `README.md`, and the `.gitignore` below):
-
-```bash
-git init
-git add .
-git commit -m "Initial commit: Snake game with persistent leaderboard"
-git branch -M main
-git remote add origin https://github.com/<your-username>/snake-game.git
-git push -u origin main
-```
-
-Replace `<your-username>` with your GitHub username (copy the exact URL
-GitHub showed you on the "create repository" page — it may differ slightly).
-
-### Recommended `.gitignore`
-Create a file named `.gitignore` in the project folder with this content so
-compiled classes, jars, and your personal leaderboard file don't get
-committed:
-
-```
-*.class
-out/
-*.jar
-*.exe
-*.msi
-*.dmg
-*.deb
-*.rpm
-.snakegame/
-```
-
-### Updating later
-Whenever you make changes:
-```bash
-git add .
-git commit -m "Describe what changed"
-git push
-```
