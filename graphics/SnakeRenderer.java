@@ -58,6 +58,15 @@ public class SnakeRenderer {
             // Eyes and pupils on head
             if (i == 0) {
                 drawEyes(g2d, posX, posY, unitSize, direction);
+
+                // Glowing energy shield bubble around head if Shield is active
+                if (engine.getActiveEffect() == logic.PowerUpType.SHIELD) {
+                    g2d.setColor(new Color(0, 229, 255, 60));
+                    g2d.fillOval(posX - 8, posY - 8, unitSize + 16, unitSize + 16);
+                    g2d.setColor(new Color(0, 229, 255, 200));
+                    g2d.setStroke(new BasicStroke(2.5f));
+                    g2d.drawOval(posX - 8, posY - 8, unitSize + 16, unitSize + 16);
+                }
             }
         }
     }

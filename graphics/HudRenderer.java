@@ -65,8 +65,40 @@ public class HudRenderer {
             drawChallengeBanner(g2d, challengeManager);
         }
 
+        // Active Power-Up badge
+        drawActivePowerUpBadge(g2d, engine, screenWidth);
+
         // Toast notification
         drawToast(g2d, engine, screenWidth);
+    }
+
+    private void drawActivePowerUpBadge(Graphics2D g2d, SnakeEngine engine, int screenWidth) {
+        logic.PowerUpType effect = engine.getActiveEffect();
+        if (effect == null) return;
+
+        String text;
+        if (effect == logic.PowerUpType.SHIELD) {
+            text = "\uD83D\uDEE1\uFE0F SHIELD: ACTIVE (1 Hit Protection)";
+        } else {
+            text = effect.getDisplayName().toUpperCase() + ": " + engine.getActiveEffectRemainingSeconds() + "s";
+        }
+
+        g2d.setFont(UITheme.FONT_BODY_BOLD);
+        FontMetrics fm = g2d.getFontMetrics();
+        int badgeW = fm.stringWidth(text) + 32;
+        int badgeH = 32;
+        int badgeX = (screenWidth - badgeW) / 2;
+        int badgeY = 88;
+
+        Color c = effect.getColor();
+        g2d.setColor(new Color(20, 26, 38, 220));
+        g2d.fillRoundRect(badgeX, badgeY, badgeW, badgeH, 16, 16);
+
+        g2d.setColor(c);
+        g2d.setStroke(new BasicStroke(1.5f));
+        g2d.drawRoundRect(badgeX, badgeY, badgeW, badgeH, 16, 16);
+
+        g2d.drawString(text, badgeX + 16, badgeY + 22);
     }
 
     private void drawChallengeBanner(Graphics2D g2d, ChallengeManager cm) {
@@ -147,5 +179,39 @@ public class HudRenderer {
         fm = g2d.getFontMetrics();
         String hint = "Press SPACEBAR or click Resume to continue";
         g2d.drawString(hint, (screenWidth - fm.stringWidth(hint)) / 2, panelY + 140);
+    }
+
+    public void drawLevelUpOverlay(Graphics2D g2d, int level, int screenWidth, int screenHeight) {
+        g2d.setColor(new Color(8, 12, 18, 175));
+        g2d.fillRect(0, 0, screenWidth, screenHeight);
+
+        int panelW = 600, panelH = 240;
+        int panelX = (screenWidth - panelW) / 2;
+        int panelY = (screenHeight - panelH) / 2;
+
+        g2d.setColor(UITheme.BG_CARD);
+        g2d.fillRoundRect(panelX, panelY, panelW, panelH, 28, 28);
+
+        g2d.setColor(new Color(0, 229, 255, 180));
+        g2d.setStroke(new BasicStroke(2.5f));
+        g2d.drawRoundRect(panelX, panelY, panelW, panelH, 28, 28);
+
+        g2d.setColor(UITheme.ACCENT_CYAN);
+        g2d.setFont(UITheme.FONT_TITLE);
+        FontMetrics fm = g2d.getFontMetrics();
+        String title = "LEVEL " + level + "!";
+        g2d.drawString(title, (screenWidth - fm.stringWidth(title)) / 2, panelY + 85);
+
+        g2d.setColor(Color.WHITE);
+        g2d.setFont(UITheme.FONT_HEADER);
+        fm = g2d.getFontMetrics();
+        String sub = "Speed Increased \u2022 New Obstacles Added!";
+        g2d.drawString(sub, (screenWidth - fm.stringWidth(sub)) / 2, panelY + 135);
+
+        g2d.setColor(UITheme.ACCENT_GOLD);
+        g2d.setFont(UITheme.FONT_BODY_BOLD);
+        fm = g2d.getFontMetrics();
+        String prompt = "Press SPACEBAR or click Resume to continue";
+        g2d.drawString(prompt, (screenWidth - fm.stringWidth(prompt)) / 2, panelY + 185);
     }
 }

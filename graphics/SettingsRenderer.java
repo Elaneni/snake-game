@@ -62,6 +62,9 @@ public class SettingsRenderer {
         g2d.drawString("Starting Level", cardX + 50, cardY + 325);
 
         // Section 4: Snake Colors
-        g2d.drawString("Snake Colors", cardX + 50, cardY + 425);
+        g2d.drawString("Snake Colors", cardX + 50, cardY + 415);
+
+        // Section 5: Audio Effects
+        g2d.drawString("Sound Effects", cardX + 50, cardY + 505);
     }
 }

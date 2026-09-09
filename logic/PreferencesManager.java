@@ -22,6 +22,7 @@ public class PreferencesManager {
     private Color backgroundColor = new Color(15, 18, 26);
     private int startingLevel = 1;
     private GameMode gameMode = GameMode.CLASSIC;
+    private boolean soundEnabled = true;
 
     public PreferencesManager() {
         load();
@@ -42,6 +43,7 @@ public class PreferencesManager {
             speedLevel = Integer.parseInt(props.getProperty("speedLevel", "5"));
             baseDelay = Integer.parseInt(props.getProperty("baseDelay", "180"));
             startingLevel = Integer.parseInt(props.getProperty("startingLevel", "1"));
+            soundEnabled = Boolean.parseBoolean(props.getProperty("soundEnabled", "true"));
             
             String modeStr = props.getProperty("gameMode", "CLASSIC");
             try {
@@ -77,6 +79,7 @@ public class PreferencesManager {
         props.setProperty("baseDelay", String.valueOf(baseDelay));
         props.setProperty("startingLevel", String.valueOf(startingLevel));
         props.setProperty("gameMode", gameMode.name());
+        props.setProperty("soundEnabled", String.valueOf(soundEnabled));
         props.setProperty("snakeHeadColor", String.valueOf(snakeHeadColor.getRGB()));
         props.setProperty("snakeBodyColor", String.valueOf(snakeBodyColor.getRGB()));
         props.setProperty("backgroundColor", String.valueOf(backgroundColor.getRGB()));
@@ -160,6 +163,15 @@ public class PreferencesManager {
 
     public void setGameMode(GameMode gameMode) {
         this.gameMode = gameMode;
+        save();
+    }
+
+    public boolean isSoundEnabled() {
+        return soundEnabled;
+    }
+
+    public void setSoundEnabled(boolean soundEnabled) {
+        this.soundEnabled = soundEnabled;
         save();
     }
 }

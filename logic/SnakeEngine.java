@@ -9,23 +9,26 @@ import java.util.Random;
 
 /**
  * Core game engine encapsulating grid physics, snake movement,
- * collision detection, apple spawning, obstacles, and particle updates.
+ * collision detection, apple spawning, obstacles, power-ups, and particle updates.
  */
 public class SnakeEngine {
     public static final int SCREEN_WIDTH = 1300;
     public static final int SCREEN_HEIGHT = 750;
     public static final int UNIT_SIZE = 50;
+    public static final int PLAY_AREA_MIN_Y = 100; // 2 * UNIT_SIZE: Apples never spawn in HUD/button area!
     public static final int GAME_UNITS = (SCREEN_WIDTH * SCREEN_HEIGHT) / (UNIT_SIZE * UNIT_SIZE);
     public static final int ANIMATION_STEPS = 5;
-    public static final int MINIMUM_DELAY = 60;
+    public static final int MINIMUM_DELAY = 50;
     public static final int DELAY_DECREMENT = 15;
     public static final int POINTS_PER_SPEED_INCREASE = 15;
     public static final int POINTS_PER_LEVEL = 35;
     public static final int MAX_LEVEL = 5;
     public static final int INITIAL_LIVES = 3;
+    public static final int MAX_LIVES = 5;
     public static final int BIG_APPLE_DURATION = 5000;
     public static final int BIG_APPLE_SIZE = UNIT_SIZE * 2;
     public static final int SMALL_APPLES_FOR_BIG = 5;
+    public static final int COMBO_WINDOW_MS = 4000;
 
     private static final int TOAST_DURATION = 3500;
     private static final int TOAST_FADE_MS = 400;
@@ -53,6 +56,16 @@ public class SnakeEngine {
     private int bigAppleY;
     private long bigAppleStartTime;
 
+    // Power-Up System
+    private PowerUp activePowerUpItem = null;
+    private PowerUpType activeEffect = null;
+    private long activeEffectEndTime = 0;
+    private int nextPowerUpThreshold = 8;
+
+    // Combo System
+    private int comboCount = 0;
+    private long lastAppleEatTime = 0;
+
     private char direction = 'R';
     private char nextDirection = 'R';
     private int animationStep = 0;
@@ -72,6 +85,7 @@ public class SnakeEngine {
 
     public enum CollisionResult {
         NONE,
+        SHIELD_SAVED,
         LIFE_LOST,
         GAME_OVER
     }
@@ -79,7 +93,8 @@ public class SnakeEngine {
     public enum AppleResult {
         NONE,
         SMALL_APPLE_EATEN,
-        BIG_APPLE_EATEN
+        BIG_APPLE_EATEN,
+        POWER_UP_COLLECTED
     }
 
     public void initGame(int startingLevel, int baseDelay, GameMode mode, int currentHighScore) {
@@ -98,6 +113,12 @@ public class SnakeEngine {
         this.nextDirection = 'R';
         this.animationStep = 0;
         this.bigAppleActive = false;
+        this.activePowerUpItem = null;
+        this.activeEffect = null;
+        this.activeEffectEndTime = 0;
+        this.nextPowerUpThreshold = 8;
+        this.comboCount = 0;
+        this.lastAppleEatTime = 0;
         this.scoreToBeat = currentHighScore;
         this.highScoreAnnouncedThisRun = false;
         this.toastMessage = null;
@@ -117,10 +138,15 @@ public class SnakeEngine {
     }
 
     public void setSafeStartingPosition() {
+        // Cap body length on respawn so it fits on screen safely!
+        bodyParts = Math.min(bodyParts, 6);
         int startX = SCREEN_WIDTH / 2 - (bodyParts * UNIT_SIZE) / 2;
         int startY = SCREEN_HEIGHT / 2;
         startX = (startX / UNIT_SIZE) * UNIT_SIZE;
         startY = (startY / UNIT_SIZE) * UNIT_SIZE;
+        if (startY < PLAY_AREA_MIN_Y) {
+            startY = PLAY_AREA_MIN_Y;
+        }
 
         while (isOnObstacle(startX, startY)) {
             startX += UNIT_SIZE;
@@ -128,8 +154,8 @@ public class SnakeEngine {
                 startX = UNIT_SIZE;
                 startY += UNIT_SIZE;
             }
-            if (startY >= SCREEN_HEIGHT) {
-                startY = UNIT_SIZE;
+            if (startY >= SCREEN_HEIGHT - UNIT_SIZE) {
+                startY = PLAY_AREA_MIN_Y;
             }
         }
 
@@ -142,7 +168,6 @@ public class SnakeEngine {
     }
 
     public void handleDirectionInput(char newDir) {
-        // Prevent 180-degree reversal against committed direction
         if (newDir == 'L' && direction != 'R') {
             nextDirection = 'L';
         } else if (newDir == 'R' && direction != 'L') {
@@ -154,10 +179,6 @@ public class SnakeEngine {
         }
     }
 
-    /**
-     * Updates interpolation step. When reaching ANIMATION_STEPS, advances grid coordinates.
-     * Returns true if a full grid step was completed.
-     */
     public boolean move() {
         animationStep++;
         boolean fullStepCompleted = false;
@@ -190,14 +211,21 @@ public class SnakeEngine {
         return fullStepCompleted;
     }
 
+    /**
+     * Spawns a small apple.
+     * Guaranteed to spawn strictly below PLAY_AREA_MIN_Y so it NEVER interferes with HUD buttons!
+     */
     public void newApple() {
         boolean validPosition;
-        int maxTries = 200;
+        int maxTries = 300;
         int tries = 0;
+        int minGridY = PLAY_AREA_MIN_Y / UNIT_SIZE;
+        int maxGridY = SCREEN_HEIGHT / UNIT_SIZE;
+
         do {
             validPosition = true;
             appleX = random.nextInt(SCREEN_WIDTH / UNIT_SIZE) * UNIT_SIZE;
-            appleY = random.nextInt(SCREEN_HEIGHT / UNIT_SIZE) * UNIT_SIZE;
+            appleY = (minGridY + random.nextInt(maxGridY - minGridY)) * UNIT_SIZE;
             Rectangle appleRect = new Rectangle(appleX, appleY, UNIT_SIZE, UNIT_SIZE);
 
             for (Rectangle obstacle : obstacles) {
@@ -219,14 +247,21 @@ public class SnakeEngine {
         } while (!validPosition && tries < maxTries);
     }
 
+    /**
+     * Spawns a big apple.
+     * Guaranteed to spawn strictly below PLAY_AREA_MIN_Y!
+     */
     public void newBigApple() {
         boolean validPosition;
-        int maxTries = 200;
+        int maxTries = 300;
         int tries = 0;
+        int minGridY = PLAY_AREA_MIN_Y / UNIT_SIZE;
+        int maxGridY = (SCREEN_HEIGHT - BIG_APPLE_SIZE) / UNIT_SIZE;
+
         do {
             validPosition = true;
             bigAppleX = random.nextInt((SCREEN_WIDTH - BIG_APPLE_SIZE) / UNIT_SIZE) * UNIT_SIZE;
-            bigAppleY = random.nextInt((SCREEN_HEIGHT - BIG_APPLE_SIZE) / UNIT_SIZE) * UNIT_SIZE;
+            bigAppleY = (minGridY + random.nextInt(Math.max(1, maxGridY - minGridY + 1))) * UNIT_SIZE;
             Rectangle bigAppleRect = new Rectangle(bigAppleX, bigAppleY, BIG_APPLE_SIZE, BIG_APPLE_SIZE);
 
             for (Rectangle obstacle : obstacles) {
@@ -242,10 +277,46 @@ public class SnakeEngine {
         bigAppleStartTime = System.currentTimeMillis();
     }
 
+    /**
+     * Spawns a special power-up item on the field.
+     */
+    public void spawnPowerUp() {
+        int minGridY = PLAY_AREA_MIN_Y / UNIT_SIZE;
+        int maxGridY = SCREEN_HEIGHT / UNIT_SIZE;
+        int px = random.nextInt(SCREEN_WIDTH / UNIT_SIZE) * UNIT_SIZE;
+        int py = (minGridY + random.nextInt(maxGridY - minGridY)) * UNIT_SIZE;
+
+        PowerUpType[] types = PowerUpType.values();
+        PowerUpType selected = types[random.nextInt(types.length)];
+
+        activePowerUpItem = new PowerUp(selected, px, py);
+    }
+
     public AppleResult checkApple() {
+        long now = System.currentTimeMillis();
+
+        // Expire active power-up effect
+        if (activeEffect != null && now >= activeEffectEndTime) {
+            activeEffect = null;
+        }
+
+        // Expire on-screen power-up item
+        if (activePowerUpItem != null && activePowerUpItem.isExpired()) {
+            activePowerUpItem = null;
+        }
+
         // Check timeout for big apple
-        if (bigAppleActive && (System.currentTimeMillis() - bigAppleStartTime >= BIG_APPLE_DURATION)) {
+        if (bigAppleActive && (now - bigAppleStartTime >= BIG_APPLE_DURATION)) {
             bigAppleActive = false;
+        }
+
+        // Check power-up collection
+        if (activePowerUpItem != null && x[0] == activePowerUpItem.getX() && y[0] == activePowerUpItem.getY()) {
+            PowerUpType type = activePowerUpItem.getType();
+            activePowerUpItem = null;
+            applyPowerUp(type);
+            spawnParticles(x[0] + UNIT_SIZE / 2, y[0] + UNIT_SIZE / 2, type.getColor());
+            return AppleResult.POWER_UP_COLLECTED;
         }
 
         // Check small apple
@@ -253,7 +324,22 @@ public class SnakeEngine {
             int tailX = x[bodyParts - 1];
             int tailY = y[bodyParts - 1];
             bodyParts++;
-            applesEaten++;
+            
+            // Combo calculation
+            if (now - lastAppleEatTime <= COMBO_WINDOW_MS) {
+                comboCount++;
+            } else {
+                comboCount = 1;
+            }
+            lastAppleEatTime = now;
+
+            int pointsAwarded = 1 * (activeEffect == PowerUpType.DOUBLE_SCORE ? 2 : 1);
+            if (comboCount > 1) {
+                pointsAwarded += (comboCount - 1);
+                showToast("\u26A1 COMBO x" + comboCount + "! +" + pointsAwarded + " PTS", new Color(255, 215, 0));
+            }
+
+            applesEaten += pointsAwarded;
             smallApplesCount++;
             totalSmallApplesEaten++;
 
@@ -265,9 +351,16 @@ public class SnakeEngine {
             spawnParticles(appleX + UNIT_SIZE / 2, appleY + UNIT_SIZE / 2, new Color(255, 50, 50));
             newApple();
 
+            // Spawn Big Apple
             if (smallApplesCount >= SMALL_APPLES_FOR_BIG) {
                 newBigApple();
                 smallApplesCount = 0;
+            }
+
+            // Occasionally spawn Power-Up
+            if (applesEaten >= nextPowerUpThreshold && activePowerUpItem == null) {
+                spawnPowerUp();
+                nextPowerUpThreshold = applesEaten + 10 + random.nextInt(10);
             }
 
             checkHighScoreToast();
@@ -282,7 +375,10 @@ public class SnakeEngine {
                 int tailX = x[bodyParts - 1];
                 int tailY = y[bodyParts - 1];
                 bodyParts++;
-                applesEaten += 5;
+
+                int points = 5 * (activeEffect == PowerUpType.DOUBLE_SCORE ? 2 : 1);
+                applesEaten += points;
+                showToast("\uD83C\uDF1F BIG BONUS! +" + points + " PTS", new Color(255, 140, 0));
 
                 x[bodyParts - 1] = tailX;
                 y[bodyParts - 1] = tailY;
@@ -298,6 +394,22 @@ public class SnakeEngine {
         }
 
         return AppleResult.NONE;
+    }
+
+    private void applyPowerUp(PowerUpType type) {
+        if (type == PowerUpType.EXTRA_LIFE) {
+            if (lives < MAX_LIVES) {
+                lives++;
+                showToast("\u2764 EXTRA LIFE! (" + lives + " Lives)", type.getColor());
+            } else {
+                applesEaten += 10;
+                showToast("\u2764 MAX LIVES! +10 BONUS PTS", type.getColor());
+            }
+        } else {
+            activeEffect = type;
+            activeEffectEndTime = System.currentTimeMillis() + type.getDurationMs();
+            showToast("\u2728 " + type.getDisplayName().toUpperCase() + ": " + type.getDescription(), type.getColor());
+        }
     }
 
     public CollisionResult checkCollisions() {
@@ -329,6 +441,19 @@ public class SnakeEngine {
         }
 
         if (collided) {
+            // Shield protection: absorbs 1 hit!
+            if (activeEffect == PowerUpType.SHIELD) {
+                activeEffect = null;
+                spawnParticles(x[0] + UNIT_SIZE / 2, y[0] + UNIT_SIZE / 2, new Color(0, 229, 255));
+                showToast("\uD83D\uDEE1\uFE0F SHIELD SHATTERED! Collision Absorbed!", new Color(0, 229, 255));
+                // Bounce back into valid boundary if outside
+                if (x[0] < 0) x[0] = 0;
+                if (x[0] >= SCREEN_WIDTH) x[0] = SCREEN_WIDTH - UNIT_SIZE;
+                if (y[0] < PLAY_AREA_MIN_Y) y[0] = PLAY_AREA_MIN_Y;
+                if (y[0] >= SCREEN_HEIGHT) y[0] = SCREEN_HEIGHT - UNIT_SIZE;
+                return CollisionResult.SHIELD_SAVED;
+            }
+
             if (gameMode == GameMode.CLASSIC) {
                 lives--;
                 if (lives <= 0) {
@@ -366,43 +491,65 @@ public class SnakeEngine {
         return (applesEaten >= nextLevelThreshold && currentLevel < MAX_LEVEL);
     }
 
+    /**
+     * Advances to the next level smoothly:
+     * Increases level, adds obstacles, safely removes any obstacle overlapping the snake,
+     * and DOES NOT reset the snake onto out-of-bounds coordinates!
+     */
     public void advanceToNextLevel() {
         if (currentLevel < MAX_LEVEL) {
             currentLevel++;
             generateObstacles(currentLevel);
             currentDelay = Math.max(MINIMUM_DELAY, baseDelay - (currentLevel - 1) * DELAY_DECREMENT);
-            resetSnakePosition();
+
+            // Safely remove any obstacle that happens to overlap the snake's current position
+            // so the player NEVER dies on level up!
+            obstacles.removeIf(obs -> {
+                for (int i = 0; i < bodyParts; i++) {
+                    Rectangle seg = new Rectangle(x[i], y[i], UNIT_SIZE, UNIT_SIZE);
+                    if (obs.intersects(seg)) return true;
+                }
+                return false;
+            });
+
+            // Ensure apple is in a valid spot
+            newApple();
         }
     }
 
     public void generateObstacles(int level) {
         obstacles.clear();
         if (level >= 2) {
-            obstacles.add(new Rectangle(0, 0, UNIT_SIZE * 2, UNIT_SIZE * 2));
+            // Level 2 corners (below HUD)
+            obstacles.add(new Rectangle(0, PLAY_AREA_MIN_Y, UNIT_SIZE * 2, UNIT_SIZE * 2));
             obstacles.add(new Rectangle(SCREEN_WIDTH - UNIT_SIZE * 2, SCREEN_HEIGHT - UNIT_SIZE * 2, UNIT_SIZE * 2, UNIT_SIZE * 2));
         }
         if (level >= 3) {
+            // Center block
             int centerX = SCREEN_WIDTH / 2 - UNIT_SIZE;
             int centerY = SCREEN_HEIGHT / 2 - UNIT_SIZE;
             obstacles.add(new Rectangle(centerX, centerY, UNIT_SIZE * 2, UNIT_SIZE * 2));
         }
         if (level >= 4) {
-            obstacles.add(new Rectangle(UNIT_SIZE * 5, UNIT_SIZE * 5, UNIT_SIZE, UNIT_SIZE));
-            obstacles.add(new Rectangle(UNIT_SIZE * 10, UNIT_SIZE * 10, UNIT_SIZE, UNIT_SIZE));
-            obstacles.add(new Rectangle(UNIT_SIZE * 15, UNIT_SIZE * 15, UNIT_SIZE, UNIT_SIZE));
+            // Symmetric barriers
+            obstacles.add(new Rectangle(UNIT_SIZE * 5, PLAY_AREA_MIN_Y + UNIT_SIZE * 2, UNIT_SIZE, UNIT_SIZE));
+            obstacles.add(new Rectangle(UNIT_SIZE * 10, PLAY_AREA_MIN_Y + UNIT_SIZE * 5, UNIT_SIZE, UNIT_SIZE));
+            obstacles.add(new Rectangle(UNIT_SIZE * 16, PLAY_AREA_MIN_Y + UNIT_SIZE * 2, UNIT_SIZE, UNIT_SIZE));
         }
         if (level >= 5) {
+            // Side barriers
             int borderThickness = UNIT_SIZE;
-            obstacles.add(new Rectangle(0, 0, SCREEN_WIDTH, borderThickness));
+            obstacles.add(new Rectangle(0, PLAY_AREA_MIN_Y, SCREEN_WIDTH, borderThickness));
             obstacles.add(new Rectangle(0, SCREEN_HEIGHT - borderThickness, SCREEN_WIDTH, borderThickness));
-            obstacles.add(new Rectangle(0, 0, borderThickness, SCREEN_HEIGHT));
-            obstacles.add(new Rectangle(SCREEN_WIDTH - borderThickness, 0, borderThickness, SCREEN_HEIGHT));
+            obstacles.add(new Rectangle(0, PLAY_AREA_MIN_Y, borderThickness, SCREEN_HEIGHT - PLAY_AREA_MIN_Y));
+            obstacles.add(new Rectangle(SCREEN_WIDTH - borderThickness, PLAY_AREA_MIN_Y, borderThickness, SCREEN_HEIGHT - PLAY_AREA_MIN_Y));
         }
     }
 
     private boolean isOnObstacle(int px, int py) {
+        Rectangle r = new Rectangle(px, py, UNIT_SIZE, UNIT_SIZE);
         for (Rectangle obstacle : obstacles) {
-            if (obstacle.contains(px, py)) {
+            if (obstacle.intersects(r)) {
                 return true;
             }
         }
@@ -451,9 +598,9 @@ public class SnakeEngine {
     }
 
     public void spawnParticles(int px, int py, Color color) {
-        for (int i = 0; i < 12; i++) {
+        for (int i = 0; i < 14; i++) {
             double angle = random.nextDouble() * 2 * Math.PI;
-            double speed = random.nextDouble() * 3 + 1;
+            double speed = random.nextDouble() * 3.5 + 1.2;
             double dx = Math.cos(angle) * speed;
             double dy = Math.sin(angle) * speed;
             particles.add(new Particle(px, py, dx, dy, color));
@@ -468,6 +615,28 @@ public class SnakeEngine {
                 particles.remove(i);
             }
         }
+    }
+
+    // Power-up & Speed calculation
+    public int getEffectiveDelay() {
+        if (activeEffect == PowerUpType.SLOW_MO) {
+            return (int) (currentDelay * 1.5); // 50% slower for precision control
+        }
+        return currentDelay;
+    }
+
+    public PowerUp getActivePowerUpItem() {
+        return activePowerUpItem;
+    }
+
+    public PowerUpType getActiveEffect() {
+        return activeEffect;
+    }
+
+    public int getActiveEffectRemainingSeconds() {
+        if (activeEffect == null) return 0;
+        long remainingMs = activeEffectEndTime - System.currentTimeMillis();
+        return Math.max(0, (int) (remainingMs / 1000));
     }
 
     // Getters & Setters
