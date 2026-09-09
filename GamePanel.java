@@ -1,1343 +1,868 @@
+import graphics.*;
 import java.awt.*;
 import java.awt.event.*;
-import java.awt.geom.Point2D;
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Random;
+import java.util.List;
 import javax.swing.*;
+import logic.*;
 
+/**
+ * Main module for the Snake Game.
+ * Coordinates between the logic package (engine, rules, preferences, leaderboard, audio)
+ * and the graphics package (renderers, themes, transparent UI controls).
+ */
 public class GamePanel extends JPanel implements ActionListener {
-    static final int SCREEN_WIDTH = 1300;
-    static final int SCREEN_HEIGHT = 750;
-    static final int UNIT_SIZE = 50;
-    static final int GAME_UNITS = (SCREEN_WIDTH * SCREEN_HEIGHT) / (UNIT_SIZE * UNIT_SIZE);
-    static final int INITIAL_DELAY = 200;
-    static final int DELAY_DECREMENT = 20;
-    static final int MINIMUM_DELAY = 80;
-    static final int POINTS_PER_SPEED_INCREASE = 15;
-    static final int POINTS_PER_LEVEL = 35;
-    static final int MAX_LEVEL = 5;
-    static final int INITIAL_LIVES = 3;
-    private int currentDelay = INITIAL_DELAY;
-    private int lastSpeedIncreaseScore = 0;
-    private final int[] x = new int[GAME_UNITS];
-    private final int[] y = new int[GAME_UNITS];
-    private final double[] renderX = new double[GAME_UNITS];
-    private final double[] renderY = new double[GAME_UNITS];
-    private int bodyParts = 6;
-    private int applesEaten;
-    private int smallApplesCount; // For spawning big apples
-    private int totalSmallApplesEaten; // For tracking challenge progress
-    private int highScore = 0;
-    private int lives = INITIAL_LIVES;
-    private int appleX;
-    private int appleY;
-    private boolean bigAppleActive = false;
-    private int bigAppleX;
-    private int bigAppleY;
-    private long bigAppleStartTime;
-    private static final int BIG_APPLE_DURATION = 3000;
-    private static final int BIG_APPLE_SIZE = UNIT_SIZE * 2;
-    private static final int SMALL_APPLES_FOR_BIG = 5;
-    private char direction = 'R';
-    private char nextDirection = 'R'; // buffered input; committed once per grid step
-    private boolean running = false;
-    private boolean paused = false;
+    public static final int SCREEN_WIDTH = SnakeEngine.SCREEN_WIDTH;
+    public static final int SCREEN_HEIGHT = SnakeEngine.SCREEN_HEIGHT;
+
+    // Active state machine
+    private GameState state;
+    private GameState previousState = GameState.MENU; // to resume back to game if settings was opened in-game
+    private boolean isLevelUpOverlay = false;
+
+    // Logic Modules
+    private final PreferencesManager preferencesManager;
+    private final LeaderboardManager leaderboardManager;
+    private final ChallengeManager challengeManager;
+    private final SnakeEngine engine;
+    private final SoundPlayer soundPlayer;
+
+    // Graphics Renderers
+    private final BackgroundRenderer backgroundRenderer;
+    private final SnakeRenderer snakeRenderer;
+    private final AppleRenderer appleRenderer;
+    private final ObstacleRenderer obstacleRenderer;
+    private final ParticleRenderer particleRenderer;
+    private final HudRenderer hudRenderer;
+    private final MenuRenderer menuRenderer;
+    private final SettingsRenderer settingsRenderer;
+    private final LeaderboardRenderer leaderboardRenderer;
+    private final HelpRenderer helpRenderer;
+    private final GameOverRenderer gameOverRenderer;
+
+    // Game loop timer
     private Timer timer;
-    private final Random random = new Random();
-    private JButton restartButton;
-    private JButton leaderboardButton;
-    private JButton pauseButton;
-    private JButton settingsButton;
-    private JButton exitButton;
-    private ArrayList<ScoreEntry> leaderboard = new ArrayList<>();
-    private Color snakeHeadColor = Color.green;
-    private Color snakeBodyColor = new Color(45, 180, 0);
-    private Color backgroundColor = Color.black;
-    private int currentLevel = 1;
-    private int startingLevel = 1;
-    private ArrayList<Rectangle> obstacles = new ArrayList<>();
-    private enum GameMode { CLASSIC, ENDLESS, CHALLENGE }
-    private GameMode gameMode = GameMode.CLASSIC;
-    private int challengeIndex = 0;
-    private long challengeStartTime;
-    private boolean challengeActive = false;
-    private String[] challenges = {
-        "Collect 10 small apples in 30 seconds",
-        "Survive for 30 seconds without hitting obstacles",
-        "Eat 2 big apples in 20 seconds"
-    };
-    private int[] challengeGoals = {10, 30, 2};
-    private int[] challengeTimeLimits = {30, 30, 20};
-    private int challengeProgress = 0;
-    private static final int ANIMATION_STEPS = 5;
-    private int animationStep = 0;
-    private double stepSize = (double) UNIT_SIZE / ANIMATION_STEPS;
-    private ArrayList<Particle> particles = new ArrayList<>();
 
-    // --- Persistent leaderboard (survives quitting the game) ---
-    // Stored under the user's home folder so it works regardless of where the app is launched from.
-    private static final String SCORES_DIR = System.getProperty("user.home") + File.separator + ".snakegame";
-    private static final String SCORES_FILE = SCORES_DIR + File.separator + "leaderboard.txt";
+    // --- UI Controls ---
+    // Start Screen (Menu) buttons
+    private TransparentButton btnStartGame;
+    private TransparentButton btnSettings;
+    private TransparentButton btnLeaderboard;
+    private TransparentButton btnHelp;
+    private TransparentButton btnExit;
 
-    // --- Non-blocking "new high score" toast (drawn on screen, never pauses the game) ---
-    private String toastMessage = null;
-    private Color toastColor = new Color(255, 215, 0);
-    private long toastStartTime;
-    private static final int TOAST_DURATION = 3500;
-    private static final int TOAST_FADE_MS = 400;
-    private int scoreToBeat = 0;
-    private boolean highScoreAnnouncedThisRun = false;
+    // In-Game Transparent HUD buttons (Do not interfere with playground)
+    private TransparentButton btnInGameSound;
+    private TransparentButton btnInGamePause;
+    private TransparentButton btnInGameSettings;
+    private TransparentButton btnInGameMenu;
 
-    private static class ScoreEntry {
-        String name;
-        int score;
+    // Settings Screen controls
+    private JSlider speedSlider;
+    private TransparentButton btnModeClassic;
+    private TransparentButton btnModeEndless;
+    private TransparentButton btnModeChallenge;
+    private final List<TransparentButton> levelButtons = new ArrayList<>();
+    private TransparentButton btnHeadColor;
+    private TransparentButton btnBodyColor;
+    private TransparentButton btnResetColors;
+    private TransparentButton btnSettingsSound;
+    private TransparentButton btnSettingsBack;
 
-        ScoreEntry(String name, int score) {
-            this.name = name;
-            this.score = score;
-        }
-    }
+    // Leaderboard Screen button
+    private TransparentButton btnLeaderboardBack;
 
-    private static class Particle {
-        double x, y;
-        double dx, dy;
-        double alpha;
-        Color color;
+    // Help Screen button
+    private TransparentButton btnHelpAction;
 
-        Particle(double x, double y, double dx, double dy, Color color) {
-            this.x = x;
-            this.y = y;
-            this.dx = dx;
-            this.dy = dy;
-            this.alpha = 1.0;
-            this.color = color;
-        }
-
-        void update() {
-            x += dx;
-            y += dy;
-            alpha -= 0.05;
-        }
-
-        void draw(Graphics g) {
-            if (alpha <= 0) return;
-            Graphics2D g2d = (Graphics2D) g;
-            g2d.setColor(new Color(color.getRed(), color.getGreen(), color.getBlue(), (int) (alpha * 255)));
-            g2d.fillOval((int) x, (int) y, 5, 5);
-        }
-    }
+    // Game Over buttons
+    private TransparentButton btnGameOverRestart;
+    private TransparentButton btnGameOverMenu;
 
     public GamePanel() {
+        // 1. Initialize Logic & Preferences
+        this.preferencesManager = new PreferencesManager();
+        this.leaderboardManager = new LeaderboardManager();
+        this.challengeManager = new ChallengeManager();
+        this.engine = new SnakeEngine();
+        this.soundPlayer = new SoundPlayer(preferencesManager.isSoundEnabled());
+
+        // 2. Initialize Graphics Renderers
+        this.backgroundRenderer = new BackgroundRenderer();
+        this.snakeRenderer = new SnakeRenderer();
+        this.appleRenderer = new AppleRenderer();
+        this.obstacleRenderer = new ObstacleRenderer();
+        this.particleRenderer = new ParticleRenderer();
+        this.hudRenderer = new HudRenderer();
+        this.menuRenderer = new MenuRenderer();
+        this.settingsRenderer = new SettingsRenderer();
+        this.leaderboardRenderer = new LeaderboardRenderer();
+        this.helpRenderer = new HelpRenderer();
+        this.gameOverRenderer = new GameOverRenderer();
+
+        // 3. Panel Configuration
         this.setPreferredSize(new Dimension(SCREEN_WIDTH, SCREEN_HEIGHT));
-        this.setBackground(backgroundColor);
+        this.setBackground(preferencesManager.getBackgroundColor());
         this.setFocusable(true);
-        this.addKeyListener(new MyKeyAdapter());
-        loadLeaderboard();
-        initButtons();
-        showInstructions();
-        startGame();
+        this.setLayout(null); // Absolute positioning for seamless glass controls
+        this.addKeyListener(new GameKeyAdapter());
+
+        // 4. Initialize all UI buttons and components
+        initUIComponents();
+
+        // 5. First-time user evaluation
+        if (preferencesManager.isFirstTimeUser()) {
+            switchState(GameState.HELP);
+        } else {
+            switchState(GameState.MENU);
+        }
+
+        // 6. Setup game timer
+        this.timer = new Timer(engine.getCurrentDelay() / SnakeEngine.ANIMATION_STEPS, this);
     }
 
-    /** Reads the saved leaderboard from disk (if any) so scores survive quitting the app. */
-    private void loadLeaderboard() {
-        leaderboard.clear();
-        File file = new File(SCORES_FILE);
-        if (!file.exists()) {
-            return;
-        }
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty()) {
-                    continue;
-                }
-                int sep = line.lastIndexOf('|');
-                if (sep == -1) {
-                    continue;
-                }
-                String name = line.substring(0, sep).trim();
-                try {
-                    int score = Integer.parseInt(line.substring(sep + 1).trim());
-                    if (!name.isEmpty()) {
-                        leaderboard.add(new ScoreEntry(name, score));
-                    }
-                } catch (NumberFormatException ignored) {
-                    // Skip malformed lines rather than crashing the game.
-                }
-            }
-        } catch (IOException e) {
-            System.err.println("Could not load leaderboard from " + SCORES_FILE + ": " + e.getMessage());
-        }
-        Collections.sort(leaderboard, Comparator.comparingInt((ScoreEntry en) -> en.score).reversed());
-        if (leaderboard.size() > 10) {
-            leaderboard.subList(10, leaderboard.size()).clear();
-        }
-        highScore = leaderboard.isEmpty() ? 0 : leaderboard.get(0).score;
+    private void initUIComponents() {
+        initMenuButtons();
+        initInGameHudButtons();
+        initSettingsComponents();
+        initLeaderboardButtons();
+        initHelpButtons();
+        initGameOverButtons();
     }
 
-    /** Writes the current leaderboard to disk so it's there next time the game is launched. */
-    private void saveLeaderboard() {
-        File dir = new File(SCORES_DIR);
-        if (!dir.exists() && !dir.mkdirs()) {
-            System.err.println("Could not create score directory: " + SCORES_DIR);
-            return;
-        }
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(SCORES_FILE))) {
-            for (ScoreEntry entry : leaderboard) {
-                String safeName = entry.name.replace("|", "/").replace("\n", " ").replace("\r", " ");
-                writer.write(safeName + "|" + entry.score);
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            System.err.println("Could not save leaderboard to " + SCORES_FILE + ": " + e.getMessage());
-        }
+    // =========================================================================
+    // UI Component Initialization
+    // =========================================================================
+
+    private void initMenuButtons() {
+        int btnW = 380;
+        int btnH = 50;
+        int btnX = (SCREEN_WIDTH - btnW) / 2;
+        int startY = 285;
+        int gap = 58;
+
+        btnStartGame = new TransparentButton("\u25B6  START GAME", 25);
+        btnStartGame.setBounds(btnX, startY, btnW, btnH);
+        btnStartGame.setFont(UITheme.FONT_BUTTON);
+        btnStartGame.setColors(
+            new Color(0, 230, 118, 30), new Color(0, 230, 118, 70),
+            new Color(0, 230, 118, 160), new Color(0, 255, 140, 240),
+            UITheme.PRIMARY_GREEN, Color.WHITE
+        );
+        btnStartGame.addActionListener(e -> {
+            soundPlayer.playClick();
+            startGame();
+        });
+        this.add(btnStartGame);
+
+        btnSettings = new TransparentButton("\u2699  SETTINGS", 25);
+        btnSettings.setBounds(btnX, startY + gap, btnW, btnH);
+        btnSettings.addActionListener(e -> {
+            soundPlayer.playClick();
+            previousState = GameState.MENU;
+            switchState(GameState.SETTINGS);
+        });
+        this.add(btnSettings);
+
+        btnLeaderboard = new TransparentButton("\uD83C\uDFC6  LEADERBOARD", 25);
+        btnLeaderboard.setBounds(btnX, startY + gap * 2, btnW, btnH);
+        btnLeaderboard.addActionListener(e -> {
+            soundPlayer.playClick();
+            switchState(GameState.LEADERBOARD);
+        });
+        this.add(btnLeaderboard);
+
+        btnHelp = new TransparentButton("\u2753  HELP & INSTRUCTIONS", 25);
+        btnHelp.setBounds(btnX, startY + gap * 3, btnW, btnH);
+        btnHelp.addActionListener(e -> {
+            soundPlayer.playClick();
+            switchState(GameState.HELP);
+        });
+        this.add(btnHelp);
+
+        btnExit = new TransparentButton("\u2715  EXIT GAME", 25);
+        btnExit.setBounds(btnX, startY + gap * 4, btnW, btnH);
+        btnExit.setColors(
+            new Color(255, 61, 87, 20), new Color(255, 61, 87, 50),
+            new Color(255, 61, 87, 100), new Color(255, 61, 87, 220),
+            new Color(255, 120, 140), Color.WHITE
+        );
+        btnExit.addActionListener(e -> System.exit(0));
+        this.add(btnExit);
     }
 
-    private void initButtons() {
-        restartButton = new JButton("Restart");
-        restartButton.setFont(new Font("Ink Free", Font.BOLD, 30));
-        restartButton.setForeground(Color.red);
-        restartButton.setBackground(backgroundColor);
-        restartButton.setFocusPainted(false);
-        restartButton.setVisible(false);
-        restartButton.addActionListener(e -> restartGame());
-        this.setLayout(null);
-        restartButton.setBounds(SCREEN_WIDTH/2 - 100, SCREEN_HEIGHT/2 + 50, 200, 50);
-        this.add(restartButton);
+    private void initInGameHudButtons() {
+        // Positioned neatly inside the top HUD bar (height 80px) on the right side.
+        // Transparent glass aesthetic ensures ZERO obstruction of gameplay!
+        int topY = 18;
+        int btnH = 44;
 
-        leaderboardButton = new JButton("Leaderboard");
-        leaderboardButton.setFont(new Font("Ink Free", Font.BOLD, 30));
-        leaderboardButton.setForeground(Color.red);
-        leaderboardButton.setBackground(backgroundColor);
-        leaderboardButton.setFocusPainted(false);
-        leaderboardButton.setVisible(false);
-        leaderboardButton.addActionListener(e -> showLeaderboard());
-        leaderboardButton.setBounds(SCREEN_WIDTH/2 - 100, SCREEN_HEIGHT/2 + 120, 200, 50);
-        this.add(leaderboardButton);
+        btnInGameMenu = new TransparentButton("\u2BAE Menu", 20);
+        btnInGameMenu.setBounds(SCREEN_WIDTH - 120, topY, 105, btnH);
+        btnInGameMenu.setFont(UITheme.FONT_BODY_BOLD);
+        btnInGameMenu.setColors(
+            new Color(255, 255, 255, 12), new Color(255, 61, 87, 45),
+            new Color(255, 255, 255, 50), new Color(255, 61, 87, 180),
+            new Color(220, 220, 220), Color.WHITE
+        );
+        btnInGameMenu.addActionListener(e -> {
+            soundPlayer.playClick();
+            if (timer != null) timer.stop();
+            switchState(GameState.MENU);
+        });
+        this.add(btnInGameMenu);
 
-        pauseButton = new JButton("Pause");
-        pauseButton.setFont(new Font("Ink Free", Font.BOLD, 20));
-        pauseButton.setForeground(Color.red);
-        pauseButton.setBackground(backgroundColor);
-        pauseButton.setFocusPainted(false);
-        pauseButton.addActionListener(e -> togglePause());
-        pauseButton.setBounds(SCREEN_WIDTH - 120, 10, 100, 40);
-        this.add(pauseButton);
+        btnInGameSettings = new TransparentButton("\u2699 Settings", 20);
+        btnInGameSettings.setBounds(SCREEN_WIDTH - 245, topY, 115, btnH);
+        btnInGameSettings.setFont(UITheme.FONT_BODY_BOLD);
+        btnInGameSettings.setColors(
+            new Color(255, 255, 255, 12), new Color(0, 229, 255, 45),
+            new Color(255, 255, 255, 50), new Color(0, 229, 255, 180),
+            new Color(220, 220, 220), Color.WHITE
+        );
+        btnInGameSettings.addActionListener(e -> {
+            soundPlayer.playClick();
+            if (state == GameState.PLAYING) togglePause();
+            previousState = GameState.PAUSED;
+            switchState(GameState.SETTINGS);
+        });
+        this.add(btnInGameSettings);
 
-        settingsButton = new JButton("Settings");
-        settingsButton.setFont(new Font("Ink Free", Font.BOLD, 20));
-        settingsButton.setForeground(Color.red);
-        settingsButton.setBackground(backgroundColor);
-        settingsButton.setFocusPainted(false);
-        settingsButton.addActionListener(e -> openSettings());
-        settingsButton.setBounds(SCREEN_WIDTH - 240, 10, 100, 40);
-        this.add(settingsButton);
-
-        exitButton = new JButton("Exit");
-        exitButton.setFont(new Font("Ink Free", Font.BOLD, 20));
-        exitButton.setForeground(Color.red);
-        exitButton.setBackground(backgroundColor);
-        exitButton.setFocusPainted(false);
-        exitButton.addActionListener(e -> System.exit(0));
-        exitButton.setBounds(SCREEN_WIDTH - 360, 10, 100, 40);
-        this.add(exitButton);
-    }
-
-    private void showInstructions() {
-        JOptionPane.showMessageDialog(this, 
-            "Welcome to Snake!\n\n" +
-            "Instructions:\n" +
-            "- Use arrow keys to move the snake.\n" +
-            "- Eat small apples (1 point each) to grow.\n" +
-            "- After 5 small apples, a big apple (3 points) appears for 3 seconds.\n" +
-            "- Snake speed increases every 15 points!\n" +
-            "- Advance to the next level every 35 points (up to Level 5)!\n" +
-            "- After Level 5, continue playing until game over (Classic Mode).\n" +
-            "- Classic Mode: 3 lives; lose a life on collision, game over when all lives are lost.\n" +
-            "- Endless Mode: No game over; reset on collision and keep scoring.\n" +
-            "- Challenge Mode: Complete objectives to progress (e.g., collect apples, survive time).\n" +
-            "- Game pauses on level-up; press SPACEBAR or click Resume to continue.\n" +
-            "- Watch out for obstacles that increase with each level!\n" +
-            "- Press SPACEBAR to pause/unpause the game.\n" +
-            "- Click the Settings button to change colors, starting level, and game mode.\n" +
-            "- Avoid hitting the walls, obstacles, or yourself (except in Endless Mode)!\n\n" +
-            "Click OK to start playing!",
-            "Snake Game Instructions", 
-            JOptionPane.INFORMATION_MESSAGE);
-        this.requestFocusInWindow();
-    }
-
-    private void openSettings() {
-        boolean wasPaused = paused;
-        if (running && !paused) {
+        btnInGamePause = new TransparentButton("\u23F8 Pause", 20);
+        btnInGamePause.setBounds(SCREEN_WIDTH - 360, topY, 105, btnH);
+        btnInGamePause.setFont(UITheme.FONT_BODY_BOLD);
+        btnInGamePause.setColors(
+            new Color(255, 255, 255, 12), new Color(0, 230, 118, 45),
+            new Color(255, 255, 255, 50), new Color(0, 230, 118, 180),
+            new Color(220, 220, 220), Color.WHITE
+        );
+        btnInGamePause.addActionListener(e -> {
+            soundPlayer.playClick();
             togglePause();
-        }
-
-        JDialog settingsDialog = new JDialog((Frame) SwingUtilities.getWindowAncestor(this), "Settings", true);
-        settingsDialog.setLayout(new GridLayout(6, 1, 10, 10));
-        settingsDialog.setSize(300, 300);
-        settingsDialog.setLocationRelativeTo(this);
-
-        JButton headColorButton = new JButton("Change Snake Head Color");
-        headColorButton.addActionListener(e -> {
-            Color newColor = JColorChooser.showDialog(settingsDialog, "Choose Snake Head Color", snakeHeadColor);
-            if (newColor != null) {
-                snakeHeadColor = newColor;
-                repaint();
-            }
         });
+        this.add(btnInGamePause);
 
-        JButton bodyColorButton = new JButton("Change Snake Body Color");
-        bodyColorButton.addActionListener(e -> {
-            Color newColor = JColorChooser.showDialog(settingsDialog, "Choose Snake Body Color", snakeBodyColor);
-            if (newColor != null) {
-                snakeBodyColor = newColor;
-                repaint();
-            }
-        });
-
-        JButton bgColorButton = new JButton("Change Background Color");
-        bgColorButton.addActionListener(e -> {
-            Color newColor = JColorChooser.showDialog(settingsDialog, "Choose Background Color", backgroundColor);
-            if (newColor != null) {
-                backgroundColor = newColor;
-                this.setBackground(backgroundColor);
-                restartButton.setBackground(backgroundColor);
-                leaderboardButton.setBackground(backgroundColor);
-                pauseButton.setBackground(backgroundColor);
-                settingsButton.setBackground(backgroundColor);
-                exitButton.setBackground(backgroundColor);
-                repaint();
-            }
-        });
-
-        JButton levelButton = new JButton("Choose Starting Level");
-        levelButton.addActionListener(e -> {
-            String[] levels = {"1", "2", "3", "4", "5"};
-            String selectedLevel = (String) JOptionPane.showInputDialog(
-                settingsDialog,
-                "Select starting level (1-5):",
-                "Choose Starting Level",
-                JOptionPane.PLAIN_MESSAGE,
-                null,
-                levels,
-                String.valueOf(startingLevel)
-            );
-            if (selectedLevel != null) {
-                startingLevel = Integer.parseInt(selectedLevel);
-                bodyParts = 6;
-                applesEaten = 0;
-                lives = INITIAL_LIVES;
-                direction = 'R';
-                nextDirection = 'R';
-                setSafeStartingPosition();
-                currentLevel = startingLevel;
-                obstacles.clear();
-                generateObstacles(currentLevel);
-                currentDelay = Math.max(MINIMUM_DELAY, INITIAL_DELAY - (currentLevel - 1) * DELAY_DECREMENT);
-                newApple();
-                smallApplesCount = 0;
-                totalSmallApplesEaten = 0;
-                bigAppleActive = false;
-                lastSpeedIncreaseScore = 0;
-                challengeIndex = 0;
-                challengeActive = false;
-                challengeProgress = 0;
-                if (timer != null) {
-                    timer.stop();
-                }
-                timer = new Timer(currentDelay / ANIMATION_STEPS, this);
-                repaint();
-            }
-        });
-
-        JButton modeButton = new JButton("Choose Game Mode");
-        modeButton.addActionListener(e -> {
-            String[] modes = {"Classic", "Endless", "Challenge"};
-            String selectedMode = (String) JOptionPane.showInputDialog(
-                settingsDialog,
-                "Select game mode:",
-                "Choose Game Mode",
-                JOptionPane.PLAIN_MESSAGE,
-                null,
-                modes,
-                gameMode.toString()
-            );
-            if (selectedMode != null) {
-                gameMode = GameMode.valueOf(selectedMode.toUpperCase());
-                bodyParts = 6;
-                applesEaten = 0;
-                lives = INITIAL_LIVES;
-                direction = 'R';
-                nextDirection = 'R';
-                setSafeStartingPosition();
-                currentLevel = startingLevel;
-                obstacles.clear();
-                generateObstacles(currentLevel);
-                currentDelay = Math.max(MINIMUM_DELAY, INITIAL_DELAY - (currentLevel - 1) * DELAY_DECREMENT);
-                newApple();
-                smallApplesCount = 0;
-                totalSmallApplesEaten = 0;
-                bigAppleActive = false;
-                lastSpeedIncreaseScore = 0;
-                challengeIndex = 0;
-                challengeActive = false;
-                challengeProgress = 0;
-                if (timer != null) {
-                    timer.stop();
-                }
-                timer = new Timer(currentDelay / ANIMATION_STEPS, this);
-                repaint();
-            }
-        });
-
-        JButton closeButton = new JButton("Close");
-        closeButton.addActionListener(e -> settingsDialog.dispose());
-
-        settingsDialog.add(headColorButton);
-        settingsDialog.add(bodyColorButton);
-        settingsDialog.add(bgColorButton);
-        settingsDialog.add(levelButton);
-        settingsDialog.add(modeButton);
-        settingsDialog.add(closeButton);
-        settingsDialog.setVisible(true);
-
-        this.requestFocusInWindow();
-
-        if (running && !wasPaused) {
-            togglePause();
-        }
+        btnInGameSound = new TransparentButton(soundPlayer.isEnabled() ? "\uD83D\uDD0A Sound" : "\uD83D\uDD07 Muted", 20);
+        btnInGameSound.setBounds(SCREEN_WIDTH - 480, topY, 110, btnH);
+        btnInGameSound.setFont(UITheme.FONT_BODY_BOLD);
+        btnInGameSound.setColors(
+            new Color(255, 255, 255, 12), new Color(255, 215, 0, 45),
+            new Color(255, 255, 255, 50), new Color(255, 215, 0, 180),
+            new Color(220, 220, 220), Color.WHITE
+        );
+        btnInGameSound.addActionListener(e -> toggleSound());
+        this.add(btnInGameSound);
     }
 
-    private void setSafeStartingPosition() {
-        int startX = SCREEN_WIDTH / 2 - (bodyParts * UNIT_SIZE) / 2;
-        int startY = SCREEN_HEIGHT / 2;
-        startX = (startX / UNIT_SIZE) * UNIT_SIZE;
-        startY = (startY / UNIT_SIZE) * UNIT_SIZE;
-        while (isOnObstacle(startX, startY)) {
-            startX += UNIT_SIZE;
-            if (startX >= SCREEN_WIDTH - bodyParts * UNIT_SIZE) {
-                startX = UNIT_SIZE;
-                startY += UNIT_SIZE;
-            }
-            if (startY >= SCREEN_HEIGHT) {
-                startY = UNIT_SIZE;
-            }
-        }
-        for (int i = 0; i < bodyParts; i++) {
-            x[i] = startX + (bodyParts - i - 1) * UNIT_SIZE;
-            y[i] = startY;
-            renderX[i] = x[i];
-            renderY[i] = y[i];
-        }
-    }
+    private void initSettingsComponents() {
+        int cardX = (SCREEN_WIDTH - 680) / 2;
+        int cardY = (SCREEN_HEIGHT - 620) / 2;
 
-    public void startGame() {
-        setSafeStartingPosition();
-        currentLevel = startingLevel;
-        obstacles.clear();
-        generateObstacles(currentLevel);
-        currentDelay = Math.max(MINIMUM_DELAY, INITIAL_DELAY - (currentLevel - 1) * DELAY_DECREMENT);
-        newApple();
-        running = true;
-        paused = false;
-        smallApplesCount = 0;
-        totalSmallApplesEaten = 0;
-        bigAppleActive = false;
-        applesEaten = 0;
-        lives = INITIAL_LIVES;
-        lastSpeedIncreaseScore = 0;
-        challengeIndex = 0;
-        challengeActive = false;
-        challengeProgress = 0;
-        animationStep = 0;
-        particles.clear();
-        toastMessage = null;
-        highScoreAnnouncedThisRun = false;
-        scoreToBeat = leaderboard.isEmpty() ? 0 : leaderboard.get(0).score;
-        if (timer != null) {
-            timer.stop();
-        }
-        timer = new Timer(currentDelay / ANIMATION_STEPS, this);
-        timer.start();
-        restartButton.setVisible(false);
-        leaderboardButton.setVisible(false);
-        pauseButton.setText("Pause");
-        this.requestFocusInWindow();
-    }
-
-    private void restartGame() {
-        bodyParts = 6;
-        applesEaten = 0;
-        lives = INITIAL_LIVES;
-        direction = 'R';
-        nextDirection = 'R';
-        startGame();
-    }
-
-    private void togglePause() {
-        if (running) {
-            paused = !paused;
-            if (paused) {
-                timer.stop();
-                pauseButton.setText("Resume");
-            } else {
-                timer.start();
-                pauseButton.setText("Pause");
+        // 1. Speed Slider
+        speedSlider = new JSlider(1, 10, preferencesManager.getSpeedLevel());
+        speedSlider.setBounds(cardX + 50, cardY + 130, 580, 50);
+        speedSlider.setOpaque(false);
+        speedSlider.setBackground(new Color(0, 0, 0, 0));
+        speedSlider.setForeground(UITheme.ACCENT_CYAN);
+        speedSlider.setMajorTickSpacing(1);
+        speedSlider.setPaintTicks(true);
+        speedSlider.setFocusable(false);
+        speedSlider.addChangeListener(e -> {
+            int val = speedSlider.getValue();
+            preferencesManager.setSpeedLevel(val);
+            engine.setBaseDelay(preferencesManager.getBaseDelay());
+            if (timer != null) {
+                timer.setDelay(engine.getEffectiveDelay() / SnakeEngine.ANIMATION_STEPS);
             }
             repaint();
-            this.requestFocusInWindow();
-        }
-    }
+        });
+        this.add(speedSlider);
 
-    private void updateSpeed() {
-        int scoreThreshold = (applesEaten / POINTS_PER_SPEED_INCREASE) * POINTS_PER_SPEED_INCREASE;
-        if (applesEaten >= lastSpeedIncreaseScore + POINTS_PER_SPEED_INCREASE) {
-            lastSpeedIncreaseScore = scoreThreshold;
-            currentDelay = Math.max(MINIMUM_DELAY, currentDelay - DELAY_DECREMENT);
-            timer.stop();
-            timer = new Timer(currentDelay / ANIMATION_STEPS, this);
-            timer.start();
-        }
-    }
+        // 2. Game Mode Selection
+        int modeY = cardY + 240;
+        int modeW = 180;
+        int modeH = 40;
 
-    private void generateObstacles(int level) {
-        obstacles.clear();
-        if (level >= 2) {
-            obstacles.add(new Rectangle(0, 0, UNIT_SIZE * 2, UNIT_SIZE * 2));
-            obstacles.add(new Rectangle(SCREEN_WIDTH - UNIT_SIZE * 2, SCREEN_HEIGHT - UNIT_SIZE * 2, UNIT_SIZE * 2, UNIT_SIZE * 2));
-        }
-        if (level >= 3) {
-            int centerX = SCREEN_WIDTH / 2 - UNIT_SIZE;
-            int centerY = SCREEN_HEIGHT / 2 - UNIT_SIZE;
-            obstacles.add(new Rectangle(centerX, centerY, UNIT_SIZE * 2, UNIT_SIZE * 2));
-        }
-        if (level >= 4) {
-            obstacles.add(new Rectangle(UNIT_SIZE * 5, UNIT_SIZE * 5, UNIT_SIZE, UNIT_SIZE));
-            obstacles.add(new Rectangle(UNIT_SIZE * 10, UNIT_SIZE * 10, UNIT_SIZE, UNIT_SIZE));
-            obstacles.add(new Rectangle(UNIT_SIZE * 15, UNIT_SIZE * 15, UNIT_SIZE, UNIT_SIZE));
-        }
-        if (level >= 5) {
-            int borderThickness = UNIT_SIZE;
-            obstacles.add(new Rectangle(0, 0, SCREEN_WIDTH, borderThickness));
-            obstacles.add(new Rectangle(0, SCREEN_HEIGHT - borderThickness, SCREEN_WIDTH, borderThickness));
-            obstacles.add(new Rectangle(0, 0, borderThickness, SCREEN_HEIGHT));
-            obstacles.add(new Rectangle(SCREEN_WIDTH - borderThickness, 0, borderThickness, SCREEN_HEIGHT));
-        }
-    }
+        btnModeClassic = new TransparentButton("Classic", 18);
+        btnModeClassic.setBounds(cardX + 50, modeY, modeW, modeH);
+        btnModeClassic.addActionListener(e -> {
+            soundPlayer.playClick();
+            setGameMode(GameMode.CLASSIC);
+        });
+        this.add(btnModeClassic);
 
-    private void advanceToNextLevel() {
-        if (currentLevel < MAX_LEVEL) {
-            currentLevel++;
-            generateObstacles(currentLevel);
-            currentDelay = Math.max(MINIMUM_DELAY, INITIAL_DELAY - (currentLevel - 1) * DELAY_DECREMENT);
-            timer.stop();
-            timer = new Timer(currentDelay / ANIMATION_STEPS, this);
-            paused = true;
-            pauseButton.setText("Resume");
-            JOptionPane.showMessageDialog(this, "Level Up! Now on Level " + currentLevel + "\nPress SPACEBAR or click Resume to continue.");
-            repaint();
-            this.requestFocusInWindow();
-        }
-    }
+        btnModeEndless = new TransparentButton("Endless", 18);
+        btnModeEndless.setBounds(cardX + 250, modeY, modeW, modeH);
+        btnModeEndless.addActionListener(e -> {
+            soundPlayer.playClick();
+            setGameMode(GameMode.ENDLESS);
+        });
+        this.add(btnModeEndless);
 
-    private void startChallenge() {
-        if (challengeIndex >= challenges.length) {
-            running = false;
-            timer.stop();
-            JOptionPane.showMessageDialog(this, "Congratulations! You completed all challenges!\nFinal Score: " + applesEaten);
-            promptForName();
-            restartButton.setVisible(true);
-            leaderboardButton.setVisible(true);
-            return;
-        }
-        challengeActive = true;
-        challengeStartTime = System.currentTimeMillis();
-        challengeProgress = 0;
-        totalSmallApplesEaten = 0; // Reset for the new challenge
-        smallApplesCount = 0;
-        JOptionPane.showMessageDialog(this, "Challenge " + (challengeIndex + 1) + ": " + challenges[challengeIndex]);
-        this.requestFocusInWindow();
-    }
+        btnModeChallenge = new TransparentButton("Challenge", 18);
+        btnModeChallenge.setBounds(cardX + 450, modeY, modeW, modeH);
+        btnModeChallenge.addActionListener(e -> {
+            soundPlayer.playClick();
+            setGameMode(GameMode.CHALLENGE);
+        });
+        this.add(btnModeChallenge);
 
-    private void updateChallenge() {
-        if (!challengeActive) return;
-        long elapsedTime = (System.currentTimeMillis() - challengeStartTime) / 1000;
-        int timeLimit = challengeTimeLimits[challengeIndex];
-        if (elapsedTime >= timeLimit) {
-            running = false;
-            timer.stop();
-            JOptionPane.showMessageDialog(this, "Challenge Failed! Time's up.");
-            promptForName();
-            restartButton.setVisible(true);
-            leaderboardButton.setVisible(true);
-            return;
+        // 3. Starting Level Selection (1 to 5)
+        int lvlY = cardY + 340;
+        int lvlW = 105;
+        int lvlH = 38;
+        for (int i = 1; i <= 5; i++) {
+            final int level = i;
+            TransparentButton lvlBtn = new TransparentButton("Level " + i, 16);
+            lvlBtn.setBounds(cardX + 50 + (i - 1) * 118, lvlY, lvlW, lvlH);
+            lvlBtn.setFont(UITheme.FONT_BODY_BOLD);
+            lvlBtn.addActionListener(e -> {
+                soundPlayer.playClick();
+                setStartingLevel(level);
+            });
+            levelButtons.add(lvlBtn);
+            this.add(lvlBtn);
         }
 
-        boolean challengeCompleted = false;
-        switch (challengeIndex) {
-            case 0: // Collect 10 small apples
-                challengeProgress = totalSmallApplesEaten;
-                if (challengeProgress >= challengeGoals[0]) {
-                    challengeCompleted = true;
-                }
-                break;
-            case 1: // Survive for 30 seconds
-                challengeProgress = (int) elapsedTime;
-                if (challengeProgress >= challengeGoals[1]) {
-                    challengeCompleted = true;
-                }
-                break;
-            case 2: // Eat 2 big apples
-                if (challengeProgress >= challengeGoals[2]) {
-                    challengeCompleted = true;
-                }
-                break;
-        }
-
-        if (challengeCompleted) {
-            challengeIndex++;
-            challengeActive = false;
-            JOptionPane.showMessageDialog(this, "Challenge Completed!");
-            startChallenge();
-        }
-    }
-
-    @Override
-    protected void paintComponent(Graphics g) {
-        super.paintComponent(g);
-        draw(g);
-    }
-
-    private void draw(Graphics g) {
-        Graphics2D g2d = (Graphics2D) g;
-        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-
-        if (running) {
-            drawBackground(g2d);
-
-            // Obstacles: soft gradient block with a lighter inset so they
-            // read as solid "walls" rather than flat gray rectangles.
-            for (Rectangle obstacle : obstacles) {
-                GradientPaint obstacleGradient = new GradientPaint(
-                    obstacle.x, obstacle.y, new Color(110, 110, 120),
-                    obstacle.x, obstacle.y + obstacle.height, new Color(60, 60, 68));
-                g2d.setPaint(obstacleGradient);
-                g2d.fillRect(obstacle.x, obstacle.y, obstacle.width, obstacle.height);
-                g2d.setColor(new Color(150, 150, 160, 120));
-                g2d.setStroke(new BasicStroke(2));
-                g2d.drawRect(obstacle.x + 1, obstacle.y + 1, obstacle.width - 2, obstacle.height - 2);
-            }
-
-            if (!bigAppleActive) {
-                drawApple(g2d, appleX, appleY, UNIT_SIZE, new Color(220, 30, 30));
-            } else {
-                drawApple(g2d, bigAppleX, bigAppleY, BIG_APPLE_SIZE, new Color(255, 140, 0));
-            }
-
-            // Drop shadow pass first (drawn behind the whole snake for a bit of depth)
-            g2d.setColor(new Color(0, 0, 0, 70));
-            for (int i = 0; i < bodyParts; i++) {
-                int sx = (int) renderX[i] + 4;
-                int sy = (int) renderY[i] + 6;
-                g2d.fillRoundRect(sx, sy, UNIT_SIZE, UNIT_SIZE, UNIT_SIZE / 2, UNIT_SIZE / 2);
-            }
-
-            // Draw snake with enhanced graphics
-            for (int i = 0; i < bodyParts; i++) {
-                int posX = (int) renderX[i];
-                int posY = (int) renderY[i];
-
-                // Gradient paint for head and body
-                Color startColor = (i == 0) ? snakeHeadColor : snakeBodyColor;
-                Color endColor = startColor.darker();
-                GradientPaint gradient = new GradientPaint(posX, posY, startColor, posX + UNIT_SIZE, posY + UNIT_SIZE, endColor);
-                g2d.setPaint(gradient);
-
-                // Draw rounded rectangles
-                int arcSize = UNIT_SIZE / 2; // For rounded corners
-                g2d.fillRoundRect(posX, posY, UNIT_SIZE, UNIT_SIZE, arcSize, arcSize);
-                g2d.setColor(new Color(255, 255, 255, 40));
-                g2d.setStroke(new BasicStroke(1.5f));
-                g2d.drawRoundRect(posX + 1, posY + 1, UNIT_SIZE - 2, UNIT_SIZE - 2, arcSize, arcSize);
-
-                // Draw body pattern (scales)
-                if (i != 0) { // Skip head
-                    g2d.setColor(endColor.brighter());
-                    g2d.setStroke(new BasicStroke(2));
-                    // Draw a diagonal line to simulate a scale
-                    g2d.drawLine(posX + 5, posY + UNIT_SIZE - 5, posX + UNIT_SIZE - 5, posY + 5);
-                }
-
-                // Draw eyes on the head
-                if (i == 0) {
-                    g2d.setColor(Color.white);
-                    int eyeSize = UNIT_SIZE / 4;
-                    int pupilSize = eyeSize / 2;
-                    int offset = UNIT_SIZE / 4;
-
-                    // Adjust eye positions based on direction
-                    int leftEyeX = posX, leftEyeY = posY, rightEyeX = posX, rightEyeY = posY;
-                    int leftPupilX = posX, leftPupilY = posY, rightPupilX = posX, rightPupilY = posY;
-
-                    switch (direction) {
-                        case 'R':
-                            leftEyeX = posX + UNIT_SIZE - offset - eyeSize;
-                            leftEyeY = posY + offset;
-                            rightEyeX = posX + UNIT_SIZE - offset - eyeSize;
-                            rightEyeY = posY + UNIT_SIZE - offset - eyeSize;
-                            leftPupilX = leftEyeX + eyeSize - pupilSize;
-                            leftPupilY = leftEyeY + pupilSize / 2;
-                            rightPupilX = rightEyeX + eyeSize - pupilSize;
-                            rightPupilY = rightEyeY + pupilSize / 2;
-                            break;
-                        case 'L':
-                            leftEyeX = posX + offset;
-                            leftEyeY = posY + offset;
-                            rightEyeX = posX + offset;
-                            rightEyeY = posY + UNIT_SIZE - offset - eyeSize;
-                            leftPupilX = leftEyeX;
-                            leftPupilY = leftEyeY + pupilSize / 2;
-                            rightPupilX = rightEyeX;
-                            rightPupilY = rightEyeY + pupilSize / 2;
-                            break;
-                        case 'U':
-                            leftEyeX = posX + offset;
-                            leftEyeY = posY + offset;
-                            rightEyeX = posX + UNIT_SIZE - offset - eyeSize;
-                            rightEyeY = posY + offset;
-                            leftPupilX = leftEyeX + pupilSize / 2;
-                            leftPupilY = leftEyeY;
-                            rightPupilX = rightEyeX + pupilSize / 2;
-                            rightPupilY = rightEyeY;
-                            break;
-                        case 'D':
-                            leftEyeX = posX + offset;
-                            leftEyeY = posY + UNIT_SIZE - offset - eyeSize;
-                            rightEyeX = posX + UNIT_SIZE - offset - eyeSize;
-                            rightEyeY = posY + UNIT_SIZE - offset - eyeSize;
-                            leftPupilX = leftEyeX + pupilSize / 2;
-                            leftPupilY = leftEyeY + eyeSize - pupilSize;
-                            rightPupilX = rightEyeX + pupilSize / 2;
-                            rightPupilY = rightEyeY + eyeSize - pupilSize;
-                            break;
-                    }
-
-                    // Draw eyes
-                    g2d.fillOval(leftEyeX, leftEyeY, eyeSize, eyeSize);
-                    g2d.fillOval(rightEyeX, rightEyeY, eyeSize, eyeSize);
-
-                    // Draw pupils
-                    g2d.setColor(Color.black);
-                    g2d.fillOval(leftPupilX, leftPupilY, pupilSize, pupilSize);
-                    g2d.fillOval(rightPupilX, rightPupilY, pupilSize, pupilSize);
-                }
-            }
-
-            for (Particle particle : particles) {
-                particle.draw(g2d);
-            }
-
-            drawHud(g2d);
-            drawToast(g2d);
-
-            if (paused) {
-                drawOverlayPanel(g2d, "Paused", "Press SPACEBAR or click Resume to continue");
-            }
-        } else {
-            gameOver(g2d);
-        }
-    }
-
-    /** Soft dark gradient background with a faint grid, replacing the flat black fill. */
-    private void drawBackground(Graphics2D g2d) {
-        GradientPaint bgGradient = new GradientPaint(
-            0, 0, backgroundColor.brighter(),
-            0, SCREEN_HEIGHT, backgroundColor.darker().darker());
-        g2d.setPaint(bgGradient);
-        g2d.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-        g2d.setColor(new Color(255, 255, 255, 14));
-        g2d.setStroke(new BasicStroke(1));
-        for (int gx = 0; gx <= SCREEN_WIDTH; gx += UNIT_SIZE) {
-            g2d.drawLine(gx, 0, gx, SCREEN_HEIGHT);
-        }
-        for (int gy = 0; gy <= SCREEN_HEIGHT; gy += UNIT_SIZE) {
-            g2d.drawLine(0, gy, SCREEN_WIDTH, gy);
-        }
-    }
-
-    /** Apple with a radial-style highlight, gradient body, and a little stem/leaf for polish. */
-    private void drawApple(Graphics2D g2d, int ax, int ay, int size, Color baseColor) {
-        int cx = ax + size / 2;
-        int cy = ay + size / 2;
-
-        // Soft glow so the apple pops against the background.
-        g2d.setColor(new Color(baseColor.getRed(), baseColor.getGreen(), baseColor.getBlue(), 60));
-        g2d.fillOval(ax - size / 6, ay - size / 6, (int) (size * 1.33), (int) (size * 1.33));
-
-        RadialGradientPaint appleGradient = new RadialGradientPaint(
-            new Point2D.Float(cx - size / 6f, cy - size / 6f), size * 0.75f,
-            new float[] {0f, 1f},
-            new Color[] {baseColor.brighter(), baseColor.darker()});
-        g2d.setPaint(appleGradient);
-        g2d.fillOval(ax, ay, size, size);
-
-        // Stem
-        g2d.setColor(new Color(90, 55, 20));
-        g2d.setStroke(new BasicStroke(Math.max(2, size / 16f)));
-        g2d.drawLine(cx, ay, cx + size / 10, ay - size / 6);
-
-        // Leaf
-        g2d.setColor(new Color(60, 170, 70));
-        int leafW = size / 3, leafH = size / 5;
-        g2d.fillOval(cx + size / 12, ay - size / 8, leafW, leafH);
-
-        // Shine highlight
-        g2d.setColor(new Color(255, 255, 255, 130));
-        int shineSize = size / 4;
-        g2d.fillOval(ax + size / 5, ay + size / 6, shineSize, shineSize);
-    }
-
-    /** Heads-up display drawn on a translucent bar for legibility over any background color. */
-    private void drawHud(Graphics2D g2d) {
-        g2d.setColor(new Color(0, 0, 0, 110));
-        g2d.fillRoundRect(0, 0, SCREEN_WIDTH, 100, 0, 0);
-
-        g2d.setColor(new Color(255, 60, 60));
-        g2d.setFont(new Font("SansSerif", Font.BOLD, 34));
-        FontMetrics metrics = getFontMetrics(g2d.getFont());
-        String scoreText = "Score: " + applesEaten + "   High Score: " + highScore;
-        g2d.drawString(scoreText, (SCREEN_WIDTH - metrics.stringWidth(scoreText)) / 2, 45);
-
-        g2d.setColor(Color.white);
-        g2d.setFont(new Font("SansSerif", Font.BOLD, 22));
-        g2d.drawString("Level: " + currentLevel, 15, 30);
-        g2d.drawString("Lives: " + lives, 15, 58);
-        g2d.drawString("Mode: " + gameMode, 15, 86);
-
-        if (gameMode == GameMode.CHALLENGE && challengeActive) {
-            long elapsedTime = (System.currentTimeMillis() - challengeStartTime) / 1000;
-            int timeLeft = challengeTimeLimits[challengeIndex] - (int) elapsedTime;
-            g2d.setColor(new Color(0, 0, 0, 110));
-            g2d.fillRoundRect(10, 106, 420, 90, 12, 12);
-            g2d.setColor(Color.white);
-            g2d.setFont(new Font("SansSerif", Font.BOLD, 18));
-            g2d.drawString("Challenge: " + challenges[challengeIndex], 20, 128);
-            g2d.drawString("Progress: " + challengeProgress + "/" + challengeGoals[challengeIndex], 20, 154);
-            g2d.drawString("Time Left: " + timeLeft + "s", 20, 180);
-        }
-    }
-
-    /** Centered translucent panel used for the Paused overlay. */
-    private void drawOverlayPanel(Graphics2D g2d, String title, String subtitle) {
-        g2d.setColor(new Color(0, 0, 0, 140));
-        g2d.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-        int panelW = 520, panelH = 180;
-        int panelX = (SCREEN_WIDTH - panelW) / 2;
-        int panelY = (SCREEN_HEIGHT - panelH) / 2;
-        g2d.setColor(new Color(25, 25, 25, 220));
-        g2d.fillRoundRect(panelX, panelY, panelW, panelH, 24, 24);
-        g2d.setColor(new Color(255, 255, 255, 60));
-        g2d.setStroke(new BasicStroke(2));
-        g2d.drawRoundRect(panelX, panelY, panelW, panelH, 24, 24);
-
-        g2d.setColor(Color.white);
-        g2d.setFont(new Font("SansSerif", Font.BOLD, 60));
-        FontMetrics metrics = getFontMetrics(g2d.getFont());
-        g2d.drawString(title, (SCREEN_WIDTH - metrics.stringWidth(title)) / 2, panelY + 90);
-
-        g2d.setColor(new Color(220, 220, 220));
-        g2d.setFont(new Font("SansSerif", Font.PLAIN, 18));
-        metrics = getFontMetrics(g2d.getFont());
-        g2d.drawString(subtitle, (SCREEN_WIDTH - metrics.stringWidth(subtitle)) / 2, panelY + 130);
-    }
-
-    private void newApple() {
-        boolean validPosition;
-        do {
-            validPosition = true;
-            appleX = random.nextInt(SCREEN_WIDTH / UNIT_SIZE) * UNIT_SIZE;
-            appleY = random.nextInt(SCREEN_HEIGHT / UNIT_SIZE) * UNIT_SIZE;
-            Rectangle appleRect = new Rectangle(appleX, appleY, UNIT_SIZE, UNIT_SIZE);
-            for (Rectangle obstacle : obstacles) {
-                if (obstacle.intersects(appleRect)) {
-                    validPosition = false;
-                    break;
-                }
-            }
-        } while (!validPosition);
-    }
-
-    private void newBigApple() {
-        boolean validPosition;
-        do {
-            validPosition = true;
-            bigAppleX = random.nextInt((SCREEN_WIDTH - BIG_APPLE_SIZE) / UNIT_SIZE) * UNIT_SIZE;
-            bigAppleY = random.nextInt((SCREEN_HEIGHT - BIG_APPLE_SIZE) / UNIT_SIZE) * UNIT_SIZE;
-            Rectangle bigAppleRect = new Rectangle(bigAppleX, bigAppleY, BIG_APPLE_SIZE, BIG_APPLE_SIZE);
-            for (Rectangle obstacle : obstacles) {
-                if (obstacle.intersects(bigAppleRect)) {
-                    validPosition = false;
-                    break;
-                }
-            }
-        } while (!validPosition);
-        bigAppleActive = true;
-        bigAppleStartTime = System.currentTimeMillis();
-    }
-
-    private boolean isOnObstacle(int x, int y) {
-        for (Rectangle obstacle : obstacles) {
-            if (obstacle.contains(x, y)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void move() {
-        animationStep++;
-        if (animationStep >= ANIMATION_STEPS) {
-            // Commit exactly one buffered direction change per grid step.
-            direction = nextDirection;
-            for (int i = bodyParts - 1; i > 0; i--) {
-                x[i] = x[i - 1];
-                y[i] = y[i - 1];
-            }
-            switch (direction) {
-                case 'U': y[0] -= UNIT_SIZE; break;
-                case 'D': y[0] += UNIT_SIZE; break;
-                case 'L': x[0] -= UNIT_SIZE; break;
-                case 'R': x[0] += UNIT_SIZE; break;
-            }
-            animationStep = 0;
-        }
-
-        for (int i = 0; i < bodyParts; i++) {
-            double targetX = x[i];
-            double targetY = y[i];
-            double currentX = renderX[i];
-            double currentY = renderY[i];
-            renderX[i] = currentX + (targetX - currentX) * ((double) animationStep / ANIMATION_STEPS);
-            renderY[i] = currentY + (targetY - currentY) * ((double) animationStep / ANIMATION_STEPS);
-        }
-    }
-
-    private void spawnParticles(int appleX, int appleY, Color color) {
-        for (int i = 0; i < 10; i++) {
-            double angle = random.nextDouble() * 2 * Math.PI;
-            double speed = random.nextDouble() * 2 + 1;
-            double dx = Math.cos(angle) * speed;
-            double dy = Math.sin(angle) * speed;
-            particles.add(new Particle(appleX + UNIT_SIZE / 2, appleY + UNIT_SIZE / 2, dx, dy, color));
-        }
-    }
-
-    private void updateParticles() {
-        for (int i = particles.size() - 1; i >= 0; i--) {
-            Particle particle = particles.get(i);
-            particle.update();
-            if (particle.alpha <= 0) {
-                particles.remove(i);
-            }
-        }
-    }
-
-    /**
-     * Fires a non-blocking "new high score" toast the first time this run's score
-     * beats the best score already on the (persisted) leaderboard. Purely visual —
-     * it never pauses the timer or interrupts play.
-     */
-    private void checkForNewHighScore() {
-        if (!highScoreAnnouncedThisRun && applesEaten > scoreToBeat) {
-            highScoreAnnouncedThisRun = true;
-            showToast("\u2605 NEW HIGH SCORE: " + applesEaten + "! \u2605", new Color(255, 215, 0));
-        }
-    }
-
-    private void showToast(String message, Color color) {
-        toastMessage = message;
-        toastColor = color;
-        toastStartTime = System.currentTimeMillis();
-    }
-
-    /** Draws the toast as a fading pill banner; called from draw() every frame while active. */
-    private void drawToast(Graphics2D g2d) {
-        if (toastMessage == null) {
-            return;
-        }
-        long elapsed = System.currentTimeMillis() - toastStartTime;
-        if (elapsed >= TOAST_DURATION) {
-            toastMessage = null;
-            return;
-        }
-        float alpha;
-        if (elapsed < TOAST_FADE_MS) {
-            alpha = elapsed / (float) TOAST_FADE_MS;
-        } else if (elapsed > TOAST_DURATION - TOAST_FADE_MS) {
-            alpha = (TOAST_DURATION - elapsed) / (float) TOAST_FADE_MS;
-        } else {
-            alpha = 1f;
-        }
-        alpha = Math.max(0f, Math.min(1f, alpha));
-
-        g2d.setFont(new Font("SansSerif", Font.BOLD, 30));
-        FontMetrics metrics = getFontMetrics(g2d.getFont());
-        int textW = metrics.stringWidth(toastMessage);
-        int panelW = textW + 60;
-        int panelH = 58;
-        int panelX = (SCREEN_WIDTH - panelW) / 2;
-        int panelY = 112;
-
-        g2d.setColor(new Color(0, 0, 0, (int) (180 * alpha)));
-        g2d.fillRoundRect(panelX, panelY, panelW, panelH, 22, 22);
-        g2d.setColor(new Color(toastColor.getRed(), toastColor.getGreen(), toastColor.getBlue(), (int) (220 * alpha)));
-        g2d.setStroke(new BasicStroke(2.5f));
-        g2d.drawRoundRect(panelX, panelY, panelW, panelH, 22, 22);
-
-        g2d.setColor(new Color(toastColor.getRed(), toastColor.getGreen(), toastColor.getBlue(), (int) (255 * alpha)));
-        g2d.drawString(toastMessage, panelX + 30, panelY + 38);
-    }
-
-    private void checkApple() {
-        if (!bigAppleActive && x[0] == appleX && y[0] == appleY) {
-            int tailX = x[bodyParts - 1];
-            int tailY = y[bodyParts - 1];
-            bodyParts++;
-            applesEaten++;
-            smallApplesCount++;
-            totalSmallApplesEaten++; // Increment total small apples for challenge
-            highScore = Math.max(highScore, applesEaten);
-            checkForNewHighScore();
-            x[bodyParts - 1] = tailX;
-            y[bodyParts - 1] = tailY;
-            renderX[bodyParts - 1] = tailX;
-            renderY[bodyParts - 1] = tailY;
-            spawnParticles(appleX, appleY, Color.red);
-            newApple();
-            if (smallApplesCount >= SMALL_APPLES_FOR_BIG) {
-                newBigApple();
-                smallApplesCount = 0; // Reset only the counter for big apple spawning
-            }
-            updateSpeed();
-            if (gameMode == GameMode.CHALLENGE) {
-                updateChallenge();
-            }
-        }
-        if (bigAppleActive) {
-            if (System.currentTimeMillis() - bigAppleStartTime >= BIG_APPLE_DURATION) {
-                bigAppleActive = false;
-                return;
-            }
-            Rectangle snakeHead = new Rectangle(x[0], y[0], UNIT_SIZE, UNIT_SIZE);
-            Rectangle bigApple = new Rectangle(bigAppleX, bigAppleY, BIG_APPLE_SIZE, BIG_APPLE_SIZE);
-            if (snakeHead.intersects(bigApple)) {
-                int tailX = x[bodyParts - 1];
-                int tailY = y[bodyParts - 1];
-                bodyParts++;
-                applesEaten += 3;
-                highScore = Math.max(highScore, applesEaten);
-                checkForNewHighScore();
-                x[bodyParts - 1] = tailX;
-                y[bodyParts - 1] = tailY;
-                renderX[bodyParts - 1] = tailX;
-                renderY[bodyParts - 1] = tailY;
-                spawnParticles(bigAppleX + BIG_APPLE_SIZE / 2, bigAppleY + BIG_APPLE_SIZE / 2, Color.orange);
-                bigAppleActive = false;
-                updateSpeed();
-                if (gameMode == GameMode.CHALLENGE && challengeIndex == 2) {
-                    challengeProgress++;
-                    updateChallenge();
-                }
-            }
-        }
-    }
-
-    private void checkCollisions() {
-        boolean collision = false;
-
-        if (x[0] < 0 || x[0] >= SCREEN_WIDTH || y[0] < 0 || y[0] >= SCREEN_HEIGHT) {
-            collision = true;
-        }
-
-        for (int i = bodyParts - 1; i > 0; i--) {
-            if (x[0] == x[i] && y[0] == y[i]) {
-                collision = true;
-                break;
-            }
-        }
-
-        for (Rectangle obstacle : obstacles) {
-            if (obstacle.contains(x[0], y[0])) {
-                collision = true;
-                break;
-            }
-        }
-
-        if (collision) {
-            if (gameMode == GameMode.CLASSIC) {
-                lives--;
-                if (lives <= 0) {
-                    running = false;
-                    timer.stop();
-                    promptForName();
-                    restartButton.setVisible(true);
-                    leaderboardButton.setVisible(true);
-                } else {
-                    setSafeStartingPosition();
-                    direction = 'R';
-                    nextDirection = 'R';
-                    bodyParts = 6;
-                    newApple();
-                    repaint();
-                }
-            } else if (gameMode == GameMode.ENDLESS) {
-                setSafeStartingPosition();
-                direction = 'R';
-                nextDirection = 'R';
-                bodyParts = 6;
-                newApple();
+        // 4. Color Pickers
+        int colorY = cardY + 435;
+        btnHeadColor = new TransparentButton("\uD83C\uDFA8 Head Color", 18);
+        btnHeadColor.setBounds(cardX + 50, colorY, 180, 42);
+        btnHeadColor.addActionListener(e -> {
+            Color newColor = JColorChooser.showDialog(this, "Choose Snake Head Color", preferencesManager.getSnakeHeadColor());
+            if (newColor != null) {
+                preferencesManager.setSnakeHeadColor(newColor);
                 repaint();
-            } else if (gameMode == GameMode.CHALLENGE) {
-                if (challengeIndex == 1) {
-                    running = false;
-                    timer.stop();
-                    JOptionPane.showMessageDialog(this, "Challenge Failed! You hit an obstacle.");
-                    promptForName();
-                    restartButton.setVisible(true);
-                    leaderboardButton.setVisible(true);
-                } else {
-                    setSafeStartingPosition();
-                    direction = 'R';
-                    nextDirection = 'R';
-                    bodyParts = 6;
-                    newApple();
-                    repaint();
-                }
             }
-        }
-    }
+        });
+        this.add(btnHeadColor);
 
-    private void promptForName() {
-        String name = JOptionPane.showInputDialog(this, "Game Over! Enter your name:", "Score: " + applesEaten, JOptionPane.PLAIN_MESSAGE);
-        if (name != null && !name.trim().isEmpty()) {
-            leaderboard.add(new ScoreEntry(name.trim(), applesEaten));
-            Collections.sort(leaderboard, Comparator.comparingInt((ScoreEntry e) -> e.score).reversed());
-            if (leaderboard.size() > 10) {
-                leaderboard.subList(10, leaderboard.size()).clear();
+        btnBodyColor = new TransparentButton("\uD83C\uDFA8 Body Color", 18);
+        btnBodyColor.setBounds(cardX + 250, colorY, 180, 42);
+        btnBodyColor.addActionListener(e -> {
+            Color newColor = JColorChooser.showDialog(this, "Choose Snake Body Color", preferencesManager.getSnakeBodyColor());
+            if (newColor != null) {
+                preferencesManager.setSnakeBodyColor(newColor);
+                repaint();
             }
-            saveLeaderboard();
-            highScore = leaderboard.isEmpty() ? 0 : leaderboard.get(0).score;
-        }
-        this.requestFocusInWindow();
-    }
+        });
+        this.add(btnBodyColor);
 
-    private void showLeaderboard() {
-        JDialog dialog = new JDialog((Frame) SwingUtilities.getWindowAncestor(this), "Leaderboard", true);
-        dialog.setSize(440, 580);
-        dialog.setLocationRelativeTo(this);
-        dialog.setLayout(new BorderLayout());
-        dialog.getContentPane().setBackground(new Color(18, 18, 18));
+        btnResetColors = new TransparentButton("\u21BA Reset Colors", 18);
+        btnResetColors.setBounds(cardX + 450, colorY, 180, 42);
+        btnResetColors.addActionListener(e -> {
+            soundPlayer.playClick();
+            preferencesManager.setSnakeHeadColor(new Color(0, 230, 118));
+            preferencesManager.setSnakeBodyColor(new Color(46, 125, 50));
+            preferencesManager.setBackgroundColor(new Color(15, 18, 26));
+            repaint();
+        });
+        this.add(btnResetColors);
 
-        JPanel headerPanel = new JPanel();
-        headerPanel.setBackground(new Color(12, 12, 12));
-        headerPanel.setBorder(BorderFactory.createEmptyBorder(18, 10, 18, 10));
-        JLabel title = new JLabel("\uD83C\uDFC6  LEADERBOARD", SwingConstants.CENTER);
-        title.setFont(new Font("SansSerif", Font.BOLD, 26));
-        title.setForeground(new Color(255, 215, 0));
-        headerPanel.add(title);
-        dialog.add(headerPanel, BorderLayout.NORTH);
+        // 5. Sound toggle in settings
+        btnSettingsSound = new TransparentButton(soundPlayer.isEnabled() ? "\uD83D\uDD0A Sound: ON" : "\uD83D\uDD07 Sound: MUTED", 18);
+        btnSettingsSound.setBounds(cardX + 50, cardY + 525, 200, 42);
+        btnSettingsSound.addActionListener(e -> toggleSound());
+        this.add(btnSettingsSound);
 
-        JPanel listPanel = new JPanel();
-        listPanel.setLayout(new BoxLayout(listPanel, BoxLayout.Y_AXIS));
-        listPanel.setBackground(new Color(18, 18, 18));
-        listPanel.setBorder(BorderFactory.createEmptyBorder(16, 20, 16, 20));
-
-        if (leaderboard.isEmpty()) {
-            JLabel empty = new JLabel("No scores yet \u2014 be the first!");
-            empty.setForeground(Color.white);
-            empty.setFont(new Font("SansSerif", Font.PLAIN, 16));
-            empty.setAlignmentX(Component.CENTER_ALIGNMENT);
-            listPanel.add(empty);
-        } else {
-            for (int i = 0; i < leaderboard.size(); i++) {
-                ScoreEntry entry = leaderboard.get(i);
-                JPanel row = buildLeaderboardRow(i + 1, entry.name, entry.score);
-                row.setAlignmentX(Component.CENTER_ALIGNMENT);
-                listPanel.add(row);
-                listPanel.add(Box.createVerticalStrut(8));
+        // 6. Back / Apply button
+        btnSettingsBack = new TransparentButton("\u2BAE BACK", 24);
+        btnSettingsBack.setBounds(cardX + 280, cardY + 525, 350, 44);
+        btnSettingsBack.setColors(
+            new Color(0, 230, 118, 30), new Color(0, 230, 118, 65),
+            new Color(0, 230, 118, 140), new Color(0, 230, 118, 220),
+            UITheme.PRIMARY_GREEN, Color.WHITE
+        );
+        btnSettingsBack.addActionListener(e -> {
+            soundPlayer.playClick();
+            if (previousState == GameState.PAUSED) {
+                switchState(GameState.PAUSED);
+            } else {
+                switchState(GameState.MENU);
             }
-        }
+        });
+        this.add(btnSettingsBack);
 
-        JScrollPane scrollPane = new JScrollPane(listPanel);
-        scrollPane.setBorder(BorderFactory.createEmptyBorder());
-        scrollPane.getVerticalScrollBar().setUnitIncrement(16);
-        scrollPane.getViewport().setBackground(new Color(18, 18, 18));
-        dialog.add(scrollPane, BorderLayout.CENTER);
-
-        JPanel footer = new JPanel();
-        footer.setBackground(new Color(12, 12, 12));
-        footer.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        JButton closeButton = new JButton("Close");
-        closeButton.setFont(new Font("SansSerif", Font.BOLD, 16));
-        closeButton.setForeground(Color.red);
-        closeButton.setFocusPainted(false);
-        closeButton.addActionListener(e -> dialog.dispose());
-        footer.add(closeButton);
-        dialog.add(footer, BorderLayout.SOUTH);
-
-        dialog.setVisible(true);
-        this.requestFocusInWindow();
+        updateSettingsButtonHighlights();
     }
 
-    /** Builds one styled row (rank medal, name, score) for the leaderboard dialog. */
-    private JPanel buildLeaderboardRow(int rank, String name, int score) {
-        JPanel row = new JPanel(new BorderLayout(10, 0));
-        row.setMaximumSize(new Dimension(1000, 46));
-        row.setPreferredSize(new Dimension(380, 46));
-        row.setBorder(BorderFactory.createCompoundBorder(
-            BorderFactory.createLineBorder(new Color(60, 60, 60), 1, true),
-            BorderFactory.createEmptyBorder(4, 12, 4, 12)));
-
-        Color rankColor;
-        String rankText;
-        switch (rank) {
-            case 1: rankColor = new Color(255, 215, 0); rankText = "\uD83E\uDD47"; break;   // gold
-            case 2: rankColor = new Color(200, 200, 210); rankText = "\uD83E\uDD48"; break;  // silver
-            case 3: rankColor = new Color(205, 127, 50); rankText = "\uD83E\uDD49"; break;   // bronze
-            default: rankColor = Color.white; rankText = "#" + rank;
-        }
-        row.setBackground(rank <= 3 ? new Color(38, 34, 20) : new Color(28, 28, 28));
-
-        JLabel rankLabel = new JLabel(rankText);
-        rankLabel.setFont(new Font("SansSerif", Font.BOLD, 20));
-        rankLabel.setForeground(rankColor);
-        rankLabel.setPreferredSize(new Dimension(50, 30));
-
-        JLabel nameLabel = new JLabel(name);
-        nameLabel.setFont(new Font("SansSerif", Font.BOLD, 17));
-        nameLabel.setForeground(Color.white);
-
-        JLabel scoreLabel = new JLabel(String.valueOf(score), SwingConstants.RIGHT);
-        scoreLabel.setFont(new Font("SansSerif", Font.BOLD, 18));
-        scoreLabel.setForeground(new Color(255, 90, 90));
-        scoreLabel.setPreferredSize(new Dimension(60, 30));
-
-        row.add(rankLabel, BorderLayout.WEST);
-        row.add(nameLabel, BorderLayout.CENTER);
-        row.add(scoreLabel, BorderLayout.EAST);
-        return row;
-    }
-
-    private void gameOver(Graphics g) {
-        Graphics2D g2d = (Graphics2D) g;
-        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-
-        GradientPaint bgGradient = new GradientPaint(
-            0, 0, new Color(40, 0, 0), 0, SCREEN_HEIGHT, Color.black);
-        g2d.setPaint(bgGradient);
-        g2d.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-        int panelW = 560, panelH = 240;
-        int panelX = (SCREEN_WIDTH - panelW) / 2;
-        int panelY = (SCREEN_HEIGHT - panelH) / 2 - 20;
-        g2d.setColor(new Color(20, 20, 20, 230));
-        g2d.fillRoundRect(panelX, panelY, panelW, panelH, 28, 28);
-        g2d.setColor(new Color(220, 30, 30, 160));
-        g2d.setStroke(new BasicStroke(3));
-        g2d.drawRoundRect(panelX, panelY, panelW, panelH, 28, 28);
-
-        g2d.setColor(Color.red);
-        g2d.setFont(new Font("SansSerif", Font.BOLD, 70));
-        FontMetrics metrics = getFontMetrics(g2d.getFont());
-        g2d.drawString("Game Over", (SCREEN_WIDTH - metrics.stringWidth("Game Over")) / 2, panelY + 90);
-
-        g2d.setColor(Color.white);
-        g2d.setFont(new Font("SansSerif", Font.BOLD, 30));
-        metrics = getFontMetrics(g2d.getFont());
-        String scoreText = "Score: " + applesEaten + "   High Score: " + highScore;
-        g2d.drawString(scoreText, (SCREEN_WIDTH - metrics.stringWidth(scoreText)) / 2, panelY + 145);
-
-        g2d.setColor(new Color(200, 200, 200));
-        g2d.setFont(new Font("SansSerif", Font.PLAIN, 18));
-        metrics = getFontMetrics(g2d.getFont());
-        String hint = "Click Restart to play again";
-        g2d.drawString(hint, (SCREEN_WIDTH - metrics.stringWidth(hint)) / 2, panelY + 190);
-    }
-
-    @Override
-    public void actionPerformed(ActionEvent e) {
-        if (running && !paused) {
-            move();
-            if (animationStep == 0) {
-                checkApple();
-                checkCollisions();
-                int nextLevelThreshold = currentLevel * POINTS_PER_LEVEL;
-                if (applesEaten >= nextLevelThreshold) {
-                    advanceToNextLevel();
-                }
-                if (gameMode == GameMode.CHALLENGE && !challengeActive) {
-                    startChallenge();
-                }
-                if (gameMode == GameMode.CHALLENGE) {
-                    updateChallenge();
-                }
-            }
-            updateParticles();
+    private void toggleSound() {
+        boolean newState = !soundPlayer.isEnabled();
+        soundPlayer.setEnabled(newState);
+        preferencesManager.setSoundEnabled(newState);
+        String label = newState ? "\uD83D\uDD0A Sound" : "\uD83D\uDD07 Muted";
+        btnInGameSound.setText(label);
+        btnSettingsSound.setText(newState ? "\uD83D\uDD0A Sound: ON" : "\uD83D\uDD07 Sound: MUTED");
+        if (newState) {
+            soundPlayer.playClick();
         }
         repaint();
     }
 
-    private class MyKeyAdapter extends KeyAdapter {
+    private void initLeaderboardButtons() {
+        int cardY = (SCREEN_HEIGHT - 620) / 2;
+        btnLeaderboardBack = new TransparentButton("\u2BAE BACK TO MENU", 24);
+        btnLeaderboardBack.setBounds((SCREEN_WIDTH - 260) / 2, cardY + 545, 260, 50);
+        btnLeaderboardBack.addActionListener(e -> {
+            soundPlayer.playClick();
+            switchState(GameState.MENU);
+        });
+        this.add(btnLeaderboardBack);
+    }
+
+    private void initHelpButtons() {
+        int cardY = (SCREEN_HEIGHT - 620) / 2;
+        btnHelpAction = new TransparentButton("GOT IT! LET'S PLAY \u2794", 25);
+        btnHelpAction.setBounds((SCREEN_WIDTH - 320) / 2, cardY + 535, 320, 52);
+        btnHelpAction.setColors(
+            new Color(0, 230, 118, 40), new Color(0, 230, 118, 80),
+            new Color(0, 230, 118, 180), new Color(0, 255, 140, 240),
+            UITheme.PRIMARY_GREEN, Color.WHITE
+        );
+        btnHelpAction.addActionListener(e -> {
+            soundPlayer.playClick();
+            if (preferencesManager.isFirstTimeUser()) {
+                preferencesManager.setFirstTimeUser(false);
+                switchState(GameState.MENU);
+            } else {
+                switchState(GameState.MENU);
+            }
+        });
+        this.add(btnHelpAction);
+    }
+
+    private void initGameOverButtons() {
+        int btnY = (SCREEN_HEIGHT - 380) / 2 - 40 + 250;
+        int btnW = 200;
+        int btnH = 50;
+        int startX = (SCREEN_WIDTH - (btnW * 2 + 30)) / 2;
+
+        btnGameOverRestart = new TransparentButton("\u21BA PLAY AGAIN", 24);
+        btnGameOverRestart.setBounds(startX, btnY, btnW, btnH);
+        btnGameOverRestart.setColors(
+            new Color(0, 230, 118, 30), new Color(0, 230, 118, 70),
+            new Color(0, 230, 118, 160), new Color(0, 255, 140, 240),
+            UITheme.PRIMARY_GREEN, Color.WHITE
+        );
+        btnGameOverRestart.addActionListener(e -> {
+            soundPlayer.playClick();
+            startGame();
+        });
+        this.add(btnGameOverRestart);
+
+        btnGameOverMenu = new TransparentButton("\u2BAE MAIN MENU", 24);
+        btnGameOverMenu.setBounds(startX + btnW + 30, btnY, btnW, btnH);
+        btnGameOverMenu.addActionListener(e -> {
+            soundPlayer.playClick();
+            switchState(GameState.MENU);
+        });
+        this.add(btnGameOverMenu);
+    }
+
+    // =========================================================================
+    // State Transitions & Visibility Management
+    // =========================================================================
+
+    public void switchState(GameState newState) {
+        this.state = newState;
+
+        // Hide all initially
+        btnStartGame.setVisible(false);
+        btnSettings.setVisible(false);
+        btnLeaderboard.setVisible(false);
+        btnHelp.setVisible(false);
+        btnExit.setVisible(false);
+
+        btnInGameSound.setVisible(false);
+        btnInGamePause.setVisible(false);
+        btnInGameSettings.setVisible(false);
+        btnInGameMenu.setVisible(false);
+
+        speedSlider.setVisible(false);
+        btnModeClassic.setVisible(false);
+        btnModeEndless.setVisible(false);
+        btnModeChallenge.setVisible(false);
+        for (TransparentButton b : levelButtons) b.setVisible(false);
+        btnHeadColor.setVisible(false);
+        btnBodyColor.setVisible(false);
+        btnResetColors.setVisible(false);
+        btnSettingsSound.setVisible(false);
+        btnSettingsBack.setVisible(false);
+
+        btnLeaderboardBack.setVisible(false);
+        btnHelpAction.setVisible(false);
+        btnGameOverRestart.setVisible(false);
+        btnGameOverMenu.setVisible(false);
+
+        switch (state) {
+            case MENU:
+                btnStartGame.setVisible(true);
+                btnSettings.setVisible(true);
+                btnLeaderboard.setVisible(true);
+                btnHelp.setVisible(true);
+                btnExit.setVisible(true);
+                break;
+
+            case PLAYING:
+            case PAUSED:
+                btnInGameSound.setVisible(true);
+                btnInGamePause.setVisible(true);
+                btnInGameSettings.setVisible(true);
+                btnInGameMenu.setVisible(true);
+                btnInGamePause.setText(state == GameState.PAUSED ? "\u25B6 Resume" : "\u23F8 Pause");
+                break;
+
+            case SETTINGS:
+                speedSlider.setValue(preferencesManager.getSpeedLevel());
+                updateSettingsButtonHighlights();
+                speedSlider.setVisible(true);
+                btnModeClassic.setVisible(true);
+                btnModeEndless.setVisible(true);
+                btnModeChallenge.setVisible(true);
+                for (TransparentButton b : levelButtons) b.setVisible(true);
+                btnHeadColor.setVisible(true);
+                btnBodyColor.setVisible(true);
+                btnResetColors.setVisible(true);
+                btnSettingsSound.setVisible(true);
+                btnSettingsBack.setText(previousState == GameState.PAUSED ? "\u25B6 RESUME GAME" : "\u2BAE BACK TO MENU");
+                btnSettingsBack.setVisible(true);
+                break;
+
+            case LEADERBOARD:
+                leaderboardManager.load();
+                btnLeaderboardBack.setVisible(true);
+                break;
+
+            case HELP:
+                if (preferencesManager.isFirstTimeUser()) {
+                    btnHelpAction.setText("GOT IT! LET'S PLAY \u2794");
+                } else {
+                    btnHelpAction.setText("\u2BAE BACK TO MENU");
+                }
+                btnHelpAction.setVisible(true);
+                break;
+
+            case GAME_OVER:
+                btnGameOverRestart.setVisible(true);
+                btnGameOverMenu.setVisible(true);
+                break;
+        }
+
+        repaint();
+        this.requestFocusInWindow();
+    }
+
+    private void updateSettingsButtonHighlights() {
+        GameMode currentMode = preferencesManager.getGameMode();
+        highlightActiveButton(btnModeClassic, currentMode == GameMode.CLASSIC);
+        highlightActiveButton(btnModeEndless, currentMode == GameMode.ENDLESS);
+        highlightActiveButton(btnModeChallenge, currentMode == GameMode.CHALLENGE);
+
+        int curLvl = preferencesManager.getStartingLevel();
+        for (int i = 0; i < levelButtons.size(); i++) {
+            highlightActiveButton(levelButtons.get(i), (i + 1) == curLvl);
+        }
+    }
+
+    private void highlightActiveButton(TransparentButton btn, boolean active) {
+        if (active) {
+            btn.setColors(
+                new Color(0, 230, 118, 50), new Color(0, 230, 118, 90),
+                new Color(0, 230, 118, 220), new Color(0, 255, 140, 255),
+                UITheme.PRIMARY_GREEN, Color.WHITE
+            );
+        } else {
+            btn.setColors(
+                new Color(255, 255, 255, 14), new Color(255, 255, 255, 30),
+                new Color(255, 255, 255, 50), new Color(255, 255, 255, 120),
+                new Color(200, 200, 200), Color.WHITE
+            );
+        }
+    }
+
+    private void setGameMode(GameMode mode) {
+        preferencesManager.setGameMode(mode);
+        engine.setGameMode(mode);
+        updateSettingsButtonHighlights();
+        repaint();
+    }
+
+    private void setStartingLevel(int level) {
+        preferencesManager.setStartingLevel(level);
+        updateSettingsButtonHighlights();
+        repaint();
+    }
+
+    // =========================================================================
+    // Game Lifecycle Management
+    // =========================================================================
+
+    private void startGame() {
+        int startingLevel = preferencesManager.getStartingLevel();
+        int baseDelay = preferencesManager.getBaseDelay();
+        GameMode mode = preferencesManager.getGameMode();
+        int highScore = leaderboardManager.getHighScore();
+
+        engine.initGame(startingLevel, baseDelay, mode, highScore);
+        challengeManager.reset();
+        isLevelUpOverlay = false;
+
+        if (mode == GameMode.CHALLENGE) {
+            challengeManager.startNextChallenge();
+        }
+
+        if (timer != null) timer.stop();
+        timer = new Timer(engine.getEffectiveDelay() / SnakeEngine.ANIMATION_STEPS, this);
+        timer.start();
+
+        switchState(GameState.PLAYING);
+    }
+
+    private void togglePause() {
+        if (state == GameState.PLAYING) {
+            isLevelUpOverlay = false;
+            timer.stop();
+            switchState(GameState.PAUSED);
+        } else if (state == GameState.PAUSED) {
+            isLevelUpOverlay = false;
+            timer.setDelay(engine.getEffectiveDelay() / SnakeEngine.ANIMATION_STEPS);
+            timer.start();
+            switchState(GameState.PLAYING);
+        }
+    }
+
+    private void handleGameOver() {
+        if (timer != null) timer.stop();
+        soundPlayer.playGameOver();
+
+        int finalScore = engine.getApplesEaten();
+        if (finalScore > 0) {
+            promptPlayerName(finalScore);
+        }
+
+        switchState(GameState.GAME_OVER);
+    }
+
+    private void promptPlayerName(int score) {
+        String name = JOptionPane.showInputDialog(
+            this,
+            "Game Over! You scored " + score + " points!\nEnter your name for the Leaderboard:",
+            "Save Score",
+            JOptionPane.PLAIN_MESSAGE
+        );
+        if (name != null && !name.trim().isEmpty()) {
+            leaderboardManager.addScore(name.trim(), score);
+        }
+    }
+
+    // =========================================================================
+    // Game Loop (Timer Action)
+    // =========================================================================
+
+    @Override
+    public void actionPerformed(ActionEvent e) {
+        if (state == GameState.PLAYING) {
+            boolean fullStep = engine.move();
+
+            if (fullStep) {
+                // Check apple & powerups
+                SnakeEngine.AppleResult appleResult = engine.checkApple();
+                if (appleResult != SnakeEngine.AppleResult.NONE) {
+                    if (appleResult == SnakeEngine.AppleResult.SMALL_APPLE_EATEN) {
+                        soundPlayer.playEatApple();
+                    } else if (appleResult == SnakeEngine.AppleResult.BIG_APPLE_EATEN) {
+                        soundPlayer.playEatBigApple();
+                    } else if (appleResult == SnakeEngine.AppleResult.POWER_UP_COLLECTED) {
+                        soundPlayer.playPowerUp();
+                    }
+
+                    // Update speed if needed
+                    engine.updateSpeed();
+                    timer.setDelay(engine.getEffectiveDelay() / SnakeEngine.ANIMATION_STEPS);
+
+                    // Level progression check
+                    if (engine.shouldAdvanceLevel()) {
+                        engine.advanceToNextLevel();
+                        soundPlayer.playLevelUp();
+                        timer.setDelay(engine.getEffectiveDelay() / SnakeEngine.ANIMATION_STEPS);
+
+                        // Celebrate level up and pause smoothly so player sees new obstacles!
+                        isLevelUpOverlay = true;
+                        timer.stop();
+                        switchState(GameState.PAUSED);
+                        btnInGamePause.setText("\u25B6 Resume");
+                        repaint();
+                        return;
+                    }
+
+                    // Challenge check
+                    if (engine.getGameMode() == GameMode.CHALLENGE) {
+                        if (appleResult == SnakeEngine.AppleResult.BIG_APPLE_EATEN && challengeManager.getChallengeIndex() == 2) {
+                            challengeManager.incrementProgress(1);
+                        }
+                        if (challengeManager.checkCompletion(engine.getTotalSmallApplesEaten())) {
+                            soundPlayer.playPowerUp();
+                            engine.showToast("\u2694 CHALLENGE COMPLETED!", UITheme.PRIMARY_GREEN);
+                            if (challengeManager.isAllChallengesCompleted()) {
+                                engine.showToast("\uD83C\uDF89 ALL CHALLENGES COMPLETED!", UITheme.ACCENT_GOLD);
+                                handleGameOver();
+                                return;
+                            } else {
+                                challengeManager.startNextChallenge();
+                            }
+                        }
+                    }
+                }
+
+                // Challenge timeout check
+                if (engine.getGameMode() == GameMode.CHALLENGE) {
+                    if (challengeManager.checkCompletion(engine.getTotalSmallApplesEaten())) {
+                        soundPlayer.playPowerUp();
+                        engine.showToast("\u2694 CHALLENGE COMPLETED!", UITheme.PRIMARY_GREEN);
+                        if (challengeManager.isAllChallengesCompleted()) {
+                            handleGameOver();
+                            return;
+                        } else {
+                            challengeManager.startNextChallenge();
+                        }
+                    } else if (challengeManager.isTimedOut()) {
+                        soundPlayer.playHit();
+                        engine.showToast("\u2716 TIME'S UP! Challenge Failed.", UITheme.ACCENT_RED);
+                        handleGameOver();
+                        return;
+                    }
+                }
+
+                // Check collisions
+                SnakeEngine.CollisionResult collision = engine.checkCollisions();
+                if (collision == SnakeEngine.CollisionResult.GAME_OVER) {
+                    handleGameOver();
+                    return;
+                } else if (collision == SnakeEngine.CollisionResult.SHIELD_SAVED) {
+                    soundPlayer.playHit();
+                } else if (collision == SnakeEngine.CollisionResult.LIFE_LOST) {
+                    soundPlayer.playHit();
+                    engine.showToast("\u26A0 LIFE LOST! " + engine.getLives() + " remaining", UITheme.ACCENT_RED);
+                }
+            }
+
+            engine.updateParticles();
+        }
+
+        repaint();
+    }
+
+    // =========================================================================
+    // Rendering Pipeline
+    // =========================================================================
+
+    @Override
+    protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        Graphics2D g2d = (Graphics2D) g;
+        UITheme.applyQualityRendering(g2d);
+
+        // 1. Draw consistent game background across all screens
+        backgroundRenderer.draw(g2d, preferencesManager.getBackgroundColor(), SCREEN_WIDTH, SCREEN_HEIGHT);
+
+        // 2. Render active screen elements
+        switch (state) {
+            case MENU:
+                menuRenderer.draw(g2d, leaderboardManager.getHighScore(), SCREEN_WIDTH, SCREEN_HEIGHT);
+                break;
+
+            case PLAYING:
+            case PAUSED:
+                // Obstacles
+                obstacleRenderer.draw(g2d, engine.getObstacles());
+
+                // Apples & Power-ups
+                appleRenderer.draw(g2d, engine);
+
+                // Snake
+                snakeRenderer.draw(g2d, engine, preferencesManager.getSnakeHeadColor(), preferencesManager.getSnakeBodyColor());
+
+                // Particles
+                particleRenderer.draw(g2d, engine.getParticles());
+
+                // Heads-Up Display
+                hudRenderer.draw(g2d, engine, challengeManager, leaderboardManager.getHighScore(), SCREEN_WIDTH, SCREEN_HEIGHT);
+
+                // Paused overlay or Level Up celebration overlay
+                if (state == GameState.PAUSED) {
+                    if (isLevelUpOverlay) {
+                        hudRenderer.drawLevelUpOverlay(g2d, engine.getCurrentLevel(), SCREEN_WIDTH, SCREEN_HEIGHT);
+                    } else {
+                        hudRenderer.drawPauseOverlay(g2d, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    }
+                }
+                break;
+
+            case SETTINGS:
+                settingsRenderer.draw(g2d, SCREEN_WIDTH, SCREEN_HEIGHT, preferencesManager.getSpeedLevel());
+                break;
+
+            case LEADERBOARD:
+                leaderboardRenderer.draw(g2d, leaderboardManager.getScores(), SCREEN_WIDTH, SCREEN_HEIGHT);
+                break;
+
+            case HELP:
+                helpRenderer.draw(g2d, preferencesManager.isFirstTimeUser(), SCREEN_WIDTH, SCREEN_HEIGHT);
+                break;
+
+            case GAME_OVER:
+                // Draw background game elements frozen underneath for dramatic depth
+                obstacleRenderer.draw(g2d, engine.getObstacles());
+                appleRenderer.draw(g2d, engine);
+                snakeRenderer.draw(g2d, engine, preferencesManager.getSnakeHeadColor(), preferencesManager.getSnakeBodyColor());
+                // Game over modal overlay
+                gameOverRenderer.draw(g2d, engine.getApplesEaten(), leaderboardManager.getHighScore(), engine.getCurrentLevel(), SCREEN_WIDTH, SCREEN_HEIGHT);
+                break;
+        }
+    }
+
+    // =========================================================================
+    // Input Handling
+    // =========================================================================
+
+    private class GameKeyAdapter extends KeyAdapter {
         @Override
         public void keyPressed(KeyEvent e) {
-            // IMPORTANT: validate against `direction` (the last COMMITTED grid
-            // direction), never against `nextDirection`. This stops a fast
-            // double key-press (e.g. UP then LEFT while still moving RIGHT)
-            // from chaining through an intermediate direction and sneaking a
-            // 180-degree reversal past the check before the snake has even
-            // visually moved. Only one direction change is honored per grid
-            // step; extra presses in between are simply ignored.
-            switch (e.getKeyCode()) {
-                case KeyEvent.VK_LEFT:
-                case KeyEvent.VK_A:
-                    if (direction != 'R') {
-                        nextDirection = 'L';
-                    }
-                    break;
-                case KeyEvent.VK_RIGHT:
-                case KeyEvent.VK_D:
-                    if (direction != 'L') {
-                        nextDirection = 'R';
-                    }
-                    break;
-                case KeyEvent.VK_UP:
-                case KeyEvent.VK_W:
-                    if (direction != 'D') {
-                        nextDirection = 'U';
-                    }
-                    break;
-                case KeyEvent.VK_DOWN:
-                case KeyEvent.VK_S:
-                    if (direction != 'U') {
-                        nextDirection = 'D';
-                    }
-                    break;
-                case KeyEvent.VK_SPACE:
+            int key = e.getKeyCode();
+
+            if (state == GameState.PLAYING) {
+                switch (key) {
+                    case KeyEvent.VK_LEFT:
+                    case KeyEvent.VK_A:
+                        engine.handleDirectionInput('L');
+                        break;
+                    case KeyEvent.VK_RIGHT:
+                    case KeyEvent.VK_D:
+                        engine.handleDirectionInput('R');
+                        break;
+                    case KeyEvent.VK_UP:
+                    case KeyEvent.VK_W:
+                        engine.handleDirectionInput('U');
+                        break;
+                    case KeyEvent.VK_DOWN:
+                    case KeyEvent.VK_S:
+                        engine.handleDirectionInput('D');
+                        break;
+                    case KeyEvent.VK_SPACE:
+                        togglePause();
+                        break;
+                    case KeyEvent.VK_ESCAPE:
+                        togglePause();
+                        break;
+                }
+            } else if (state == GameState.PAUSED) {
+                if (key == KeyEvent.VK_SPACE || key == KeyEvent.VK_ESCAPE) {
                     togglePause();
-                    break;
+                }
+            } else if (state == GameState.SETTINGS || state == GameState.LEADERBOARD || state == GameState.HELP) {
+                if (key == KeyEvent.VK_ESCAPE) {
+                    switchState(previousState == GameState.PAUSED ? GameState.PAUSED : GameState.MENU);
+                }
             }
         }
     }
