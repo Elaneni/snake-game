@@ -1,177 +1,104 @@
 package logic;
 
-import java.awt.Color;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.util.Properties;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
- * Manages persistent user preferences (first-time launch tracking, speed settings, colors, mode).
+ * Settings and lifetime stats, persisted in the {@link Database}.
+ * Fields are public for brevity; call {@link #save()} after changing them.
  */
-public class PreferencesManager {
-    private static final String PREF_DIR = System.getProperty("user.home") + File.separator + ".snakegame";
-    private static final String PREF_FILE = PREF_DIR + File.separator + "preferences.properties";
+public final class PreferencesManager {
+    private final Database db;
 
-    private boolean firstTimeUser = true;
-    private int speedLevel = 5; // 1 (Slowest) to 10 (Fastest)
-    private int baseDelay = 180; // milliseconds
-    private Color snakeHeadColor = new Color(0, 230, 118);
-    private Color snakeBodyColor = new Color(46, 125, 50);
-    private Color backgroundColor = new Color(15, 18, 26);
-    private int startingLevel = 1;
-    private GameMode gameMode = GameMode.CLASSIC;
-    private boolean soundEnabled = true;
+    public boolean firstTimeUser = true;
+    public int speedLevel = 5;          // 1..10
+    public int startingLevel = 1;       // 1..MAX_LEVEL
+    public GameMode gameMode = GameMode.CLASSIC;
+    public boolean soundEnabled = true;
+    public boolean wrapWalls = false;
+    public int skin = 0;
+    public int theme = 0;
+    public boolean screenShake = true;
+    public boolean showFps = false;
+    public String lastName = "";
 
-    public PreferencesManager() {
+    // Lifetime stats: computed from the runs table (plus any totals imported from older versions).
+    public int gamesPlayed, totalApples, bestCombo, longestSnake;
+    public long totalPlayMs;
+    private Map<String, String> settings = new HashMap<>();
+
+    public PreferencesManager(Database db) {
+        this.db = db;
         load();
+        refreshStats();
     }
 
-    public void load() {
-        File file = new File(PREF_FILE);
-        if (!file.exists()) {
-            // First time ever running with this config
-            firstTimeUser = true;
-            return;
-        }
-
-        Properties props = new Properties();
-        try (FileInputStream in = new FileInputStream(file)) {
-            props.load(in);
-            firstTimeUser = Boolean.parseBoolean(props.getProperty("firstTimeUser", "false"));
-            speedLevel = Integer.parseInt(props.getProperty("speedLevel", "5"));
-            baseDelay = Integer.parseInt(props.getProperty("baseDelay", "180"));
-            startingLevel = Integer.parseInt(props.getProperty("startingLevel", "1"));
-            soundEnabled = Boolean.parseBoolean(props.getProperty("soundEnabled", "true"));
-            
-            String modeStr = props.getProperty("gameMode", "CLASSIC");
-            try {
-                gameMode = GameMode.valueOf(modeStr.toUpperCase());
-            } catch (Exception e) {
-                gameMode = GameMode.CLASSIC;
-            }
-
-            if (props.containsKey("snakeHeadColor")) {
-                snakeHeadColor = new Color(Integer.parseInt(props.getProperty("snakeHeadColor")));
-            }
-            if (props.containsKey("snakeBodyColor")) {
-                snakeBodyColor = new Color(Integer.parseInt(props.getProperty("snakeBodyColor")));
-            }
-            if (props.containsKey("backgroundColor")) {
-                backgroundColor = new Color(Integer.parseInt(props.getProperty("backgroundColor")));
-            }
-        } catch (Exception e) {
-            System.err.println("Could not load preferences: " + e.getMessage());
+    private void load() {
+        settings = db.loadSettings(); // empty on a brand-new database: defaults apply
+        firstTimeUser = Boolean.parseBoolean(settings.getOrDefault("firstTimeUser", "true"));
+        speedLevel = clamp(num("speedLevel", 5), 1, 10);
+        startingLevel = clamp(num("startingLevel", 1), 1, SnakeEngine.MAX_LEVEL);
+        soundEnabled = Boolean.parseBoolean(settings.getOrDefault("soundEnabled", "true"));
+        wrapWalls = Boolean.parseBoolean(settings.getOrDefault("wrapWalls", "false"));
+        screenShake = Boolean.parseBoolean(settings.getOrDefault("screenShake", "true"));
+        showFps = Boolean.parseBoolean(settings.getOrDefault("showFps", "false"));
+        skin = Math.max(0, num("skin", 0));
+        theme = Math.max(0, num("theme", 0));
+        lastName = settings.getOrDefault("lastName", "");
+        try {
+            gameMode = GameMode.valueOf(settings.getOrDefault("gameMode", "CLASSIC").toUpperCase());
+        } catch (IllegalArgumentException e) {
+            gameMode = GameMode.CLASSIC;
         }
     }
 
     public void save() {
-        File dir = new File(PREF_DIR);
-        if (!dir.exists() && !dir.mkdirs()) {
-            System.err.println("Could not create directory for preferences: " + PREF_DIR);
-            return;
+        Map<String, String> m = new HashMap<>();
+        m.put("firstTimeUser", String.valueOf(firstTimeUser));
+        m.put("speedLevel", String.valueOf(speedLevel));
+        m.put("startingLevel", String.valueOf(startingLevel));
+        m.put("gameMode", gameMode.name());
+        m.put("soundEnabled", String.valueOf(soundEnabled));
+        m.put("wrapWalls", String.valueOf(wrapWalls));
+        m.put("screenShake", String.valueOf(screenShake));
+        m.put("showFps", String.valueOf(showFps));
+        m.put("skin", String.valueOf(skin));
+        m.put("theme", String.valueOf(theme));
+        m.put("lastName", lastName);
+        db.putSettings(m);
+    }
+
+    /** Stores a finished run, refreshes the lifetime stats, and returns the run id. */
+    public long recordRun(SnakeEngine e, boolean endedManually) {
+        long id = db.insertRun(e, endedManually);
+        refreshStats();
+        return id;
+    }
+
+    private void refreshStats() {
+        Database.Totals t = db.totals();
+        gamesPlayed = num("legacy.stats.gamesPlayed", 0) + t.games();
+        totalApples = (int) (num("legacy.stats.totalApples", 0) + t.apples());
+        bestCombo = Math.max(num("legacy.stats.bestCombo", 0), t.bestCombo());
+        longestSnake = Math.max(num("legacy.stats.longestSnake", 0), t.longestSnake());
+        long legacyMs;
+        try {
+            legacyMs = Long.parseLong(settings.getOrDefault("legacy.stats.totalPlayMs", "0"));
+        } catch (NumberFormatException e) {
+            legacyMs = 0;
         }
+        totalPlayMs = legacyMs + t.playMs();
+    }
 
-        Properties props = new Properties();
-        props.setProperty("firstTimeUser", String.valueOf(firstTimeUser));
-        props.setProperty("speedLevel", String.valueOf(speedLevel));
-        props.setProperty("baseDelay", String.valueOf(baseDelay));
-        props.setProperty("startingLevel", String.valueOf(startingLevel));
-        props.setProperty("gameMode", gameMode.name());
-        props.setProperty("soundEnabled", String.valueOf(soundEnabled));
-        props.setProperty("snakeHeadColor", String.valueOf(snakeHeadColor.getRGB()));
-        props.setProperty("snakeBodyColor", String.valueOf(snakeBodyColor.getRGB()));
-        props.setProperty("backgroundColor", String.valueOf(backgroundColor.getRGB()));
-
-        try (FileOutputStream out = new FileOutputStream(PREF_FILE)) {
-            props.store(out, "Snake Game User Preferences");
-        } catch (IOException e) {
-            System.err.println("Could not save preferences: " + e.getMessage());
+    private int num(String key, int def) {
+        try {
+            return Integer.parseInt(settings.getOrDefault(key, String.valueOf(def)).trim());
+        } catch (NumberFormatException e) {
+            return def;
         }
     }
 
-    public boolean isFirstTimeUser() {
-        return firstTimeUser;
-    }
-
-    public void setFirstTimeUser(boolean firstTimeUser) {
-        this.firstTimeUser = firstTimeUser;
-        save();
-    }
-
-    public int getSpeedLevel() {
-        return speedLevel;
-    }
-
-    /**
-     * Set speed level from 1 (Slowest, ~240ms) to 10 (Fastest, ~60ms).
-     */
-    public void setSpeedLevel(int level) {
-        this.speedLevel = Math.max(1, Math.min(10, level));
-        // Map 1..10 to 240ms down to 60ms linearly:
-        // Level 1: 240ms
-        // Level 5: 160ms
-        // Level 10: 60ms
-        this.baseDelay = 260 - (this.speedLevel * 20);
-        save();
-    }
-
-    public int getBaseDelay() {
-        return baseDelay;
-    }
-
-    public Color getSnakeHeadColor() {
-        return snakeHeadColor;
-    }
-
-    public void setSnakeHeadColor(Color snakeHeadColor) {
-        this.snakeHeadColor = snakeHeadColor;
-        save();
-    }
-
-    public Color getSnakeBodyColor() {
-        return snakeBodyColor;
-    }
-
-    public void setSnakeBodyColor(Color snakeBodyColor) {
-        this.snakeBodyColor = snakeBodyColor;
-        save();
-    }
-
-    public Color getBackgroundColor() {
-        return backgroundColor;
-    }
-
-    public void setBackgroundColor(Color backgroundColor) {
-        this.backgroundColor = backgroundColor;
-        save();
-    }
-
-    public int getStartingLevel() {
-        return startingLevel;
-    }
-
-    public void setStartingLevel(int startingLevel) {
-        this.startingLevel = Math.max(1, Math.min(5, startingLevel));
-        save();
-    }
-
-    public GameMode getGameMode() {
-        return gameMode;
-    }
-
-    public void setGameMode(GameMode gameMode) {
-        this.gameMode = gameMode;
-        save();
-    }
-
-    public boolean isSoundEnabled() {
-        return soundEnabled;
-    }
-
-    public void setSoundEnabled(boolean soundEnabled) {
-        this.soundEnabled = soundEnabled;
-        save();
+    private static int clamp(int v, int lo, int hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 }

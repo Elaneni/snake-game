@@ -1,14 +1,6 @@
 package logic;
 
-/**
- * High-level state machine representing the active screen in the Snake Game.
- */
+/** The screen currently shown. */
 public enum GameState {
-    MENU,
-    HELP,
-    SETTINGS,
-    LEADERBOARD,
-    PLAYING,
-    PAUSED,
-    GAME_OVER
+    MENU, HELP, SETTINGS, LEADERBOARD, PLAYING, PAUSED, GAME_OVER
 }

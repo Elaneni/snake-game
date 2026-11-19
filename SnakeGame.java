@@ -1,7 +1,8 @@
-public class SnakeGame {
+import java.awt.EventQueue;
 
-	public static void main(String[] args) {
-		
-		 new GameFrame();
-	}
+/** Entry point. */
+public class SnakeGame {
+    public static void main(String[] args) {
+        EventQueue.invokeLater(() -> new Game().open());
+    }
 }

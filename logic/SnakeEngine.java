@@ -1,667 +1,690 @@
 package logic;
 
-import java.awt.Color;
-import java.awt.Rectangle;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Random;
 
 /**
- * Core game engine encapsulating grid physics, snake movement,
- * collision detection, apple spawning, obstacles, power-ups, and particle updates.
+ * Grid-based game simulation. Everything is measured in cells and in game time
+ * (milliseconds fed through {@link #update}), so pausing freezes every timer.
+ * Rendering reads the state through getters; events are pushed to a {@link Listener}.
  */
-public class SnakeEngine {
-    public static final int SCREEN_WIDTH = 1300;
-    public static final int SCREEN_HEIGHT = 750;
-    public static final int UNIT_SIZE = 50;
-    public static final int PLAY_AREA_MIN_Y = 100; // 2 * UNIT_SIZE: Apples never spawn in HUD/button area!
-    public static final int GAME_UNITS = (SCREEN_WIDTH * SCREEN_HEIGHT) / (UNIT_SIZE * UNIT_SIZE);
-    public static final int ANIMATION_STEPS = 5;
-    public static final int MINIMUM_DELAY = 50;
-    public static final int DELAY_DECREMENT = 15;
-    public static final int POINTS_PER_SPEED_INCREASE = 15;
-    public static final int POINTS_PER_LEVEL = 35;
-    public static final int MAX_LEVEL = 5;
-    public static final int INITIAL_LIVES = 3;
-    public static final int MAX_LIVES = 5;
-    public static final int BIG_APPLE_DURATION = 5000;
-    public static final int BIG_APPLE_SIZE = UNIT_SIZE * 2;
-    public static final int SMALL_APPLES_FOR_BIG = 5;
-    public static final int COMBO_WINDOW_MS = 4000;
+public final class SnakeEngine {
+    public static final int COLS = 32, ROWS = 16, CELLS = COLS * ROWS;
+    public static final int START_LENGTH = 4, MAX_LEVEL = 6, POINTS_PER_LEVEL = 30;
+    public static final int CLASSIC_LIVES = 3, MAX_LIVES = 5, SMALL_FOR_BIG = 5;
+    public static final double BIG_APPLE_MS = 6500, ITEM_MS = 9000, COMBO_MS = 3000;
+    public static final double TIME_ATTACK_MS = 90_000, READY_MS = 1800, CRASH_PENALTY_MS = 5000;
 
-    private static final int TOAST_DURATION = 3500;
-    private static final int TOAST_FADE_MS = 400;
+    public enum EndReason { NONE, OUT_OF_LIVES, CHALLENGE_FAILED, CHALLENGES_CLEARED, TIME_UP }
 
-    private final int[] x = new int[GAME_UNITS];
-    private final int[] y = new int[GAME_UNITS];
-    private final double[] renderX = new double[GAME_UNITS];
-    private final double[] renderY = new double[GAME_UNITS];
-
-    private int bodyParts = 6;
-    private int applesEaten = 0;
-    private int smallApplesCount = 0;
-    private int totalSmallApplesEaten = 0;
-    private int lives = INITIAL_LIVES;
-    private int currentLevel = 1;
-    private int startingLevel = 1;
-    private int currentDelay = 180;
-    private int baseDelay = 180;
-    private int lastSpeedIncreaseScore = 0;
-
-    private int appleX;
-    private int appleY;
-    private boolean bigAppleActive = false;
-    private int bigAppleX;
-    private int bigAppleY;
-    private long bigAppleStartTime;
-
-    // Power-Up System
-    private PowerUp activePowerUpItem = null;
-    private PowerUpType activeEffect = null;
-    private long activeEffectEndTime = 0;
-    private int nextPowerUpThreshold = 8;
-
-    // Combo System
-    private int comboCount = 0;
-    private long lastAppleEatTime = 0;
-
-    private char direction = 'R';
-    private char nextDirection = 'R';
-    private int animationStep = 0;
-
-    private final List<Rectangle> obstacles = new ArrayList<>();
-    private final List<Particle> particles = new ArrayList<>();
-    private final Random random = new Random();
-
-    private GameMode gameMode = GameMode.CLASSIC;
-
-    // Toast notifications
-    private String toastMessage = null;
-    private Color toastColor = new Color(255, 215, 0);
-    private long toastStartTime = 0;
-    private int scoreToBeat = 0;
-    private boolean highScoreAnnouncedThisRun = false;
-
-    public enum CollisionResult {
-        NONE,
-        SHIELD_SAVED,
-        LIFE_LOST,
-        GAME_OVER
+    /** Game events, all called synchronously from {@link #update}. */
+    public interface Listener {
+        default void onEat(int x, int y, int points, int combo, boolean big) {}
+        default void onPowerUp(PowerUpType type, int x, int y) {}
+        default void onShieldBreak(int x, int y) {}
+        default void onCrash(int x, int y, boolean fatal) {}
+        default void onLevelUp(int level) {}
+        default void onChallengeComplete(int index, boolean allDone) {}
+        default void onNewBest(int score) {}
     }
 
-    public enum AppleResult {
-        NONE,
-        SMALL_APPLE_EATEN,
-        BIG_APPLE_EATEN,
-        POWER_UP_COLLECTED
+    private static final Listener SILENT = new Listener() {};
+
+    // Configuration
+    private GameMode mode = GameMode.CLASSIC;
+    private boolean wrap, autopilot;
+    private int speedLevel = 5, startLevel = 1;
+    private Listener listener = SILENT;
+
+    // Snake: index 0 is the head. p* arrays hold positions before the last step (for interpolation).
+    private final int[] xs = new int[CELLS], ys = new int[CELLS], pxs = new int[CELLS], pys = new int[CELLS];
+    private final byte[] body = new byte[CELLS];
+    private final boolean[] walls = new boolean[CELLS];
+    private int len, pendingGrowth, wallsVersion;
+    private Direction dir = Direction.RIGHT;
+    private final ArrayDeque<Direction> inputs = new ArrayDeque<>(4);
+
+    // Items
+    private int appleX, appleY, prevAppleX, prevAppleY;
+    private double appleAge;
+    private boolean bigActive;
+    private int bigX, bigY;
+    private double bigLeft, bigAge;
+    private PowerUpType item;
+    private int itemX, itemY;
+    private double itemLeft, itemAge;
+    private PowerUpType effect;
+    private double effectLeft;
+
+    // Progress
+    private int score, lives, level, applesEaten, bigEaten, powerUps, combo, bestCombo, maxLength;
+    private int smallSinceBig, nextItemAt, bestToBeat;
+    private boolean bestAnnounced;
+    private double comboLeft, stepAcc, readyMs, stunMs, elapsed, timeLeft;
+    private int challengeIndex, challengeBase, challengeBestCombo;
+    private double challengeLeft, challengeElapsed;
+    private EndReason end = EndReason.NONE;
+
+    private final Random rng = new Random();
+    private final int[] scratch = new int[CELLS];
+    private final int[] visitStamp = new int[CELLS];
+    private int stamp;
+
+    public void setListener(Listener l) { listener = l == null ? SILENT : l; }
+    public void setAutopilot(boolean on) { autopilot = on; }
+
+    public void start(GameMode mode, int speedLevel, int startLevel, boolean wrap, int bestToBeat) {
+        this.mode = mode;
+        this.speedLevel = Math.max(1, Math.min(10, speedLevel));
+        this.startLevel = Math.max(1, Math.min(MAX_LEVEL, startLevel));
+        this.wrap = wrap;
+        this.bestToBeat = bestToBeat;
+        level = this.startLevel;
+        lives = mode == GameMode.CLASSIC ? CLASSIC_LIVES : 0;
+        score = applesEaten = bigEaten = powerUps = combo = bestCombo = smallSinceBig = pendingGrowth = 0;
+        nextItemAt = 6;
+        bestAnnounced = false;
+        comboLeft = stepAcc = elapsed = stunMs = effectLeft = 0;
+        timeLeft = TIME_ATTACK_MS;
+        effect = null;
+        item = null;
+        bigActive = false;
+        end = EndReason.NONE;
+        buildWalls();
+        placeSnake();
+        spawnApple();
+        maxLength = len;
+        readyMs = autopilot ? 0 : READY_MS;
+        if (mode == GameMode.CHALLENGE) beginChallenge(0);
     }
 
-    public void initGame(int startingLevel, int baseDelay, GameMode mode, int currentHighScore) {
-        this.startingLevel = startingLevel;
-        this.currentLevel = startingLevel;
-        this.baseDelay = baseDelay;
-        this.currentDelay = Math.max(MINIMUM_DELAY, baseDelay - (currentLevel - 1) * DELAY_DECREMENT);
-        this.gameMode = mode;
-        this.bodyParts = 6;
-        this.applesEaten = 0;
-        this.smallApplesCount = 0;
-        this.totalSmallApplesEaten = 0;
-        this.lives = INITIAL_LIVES;
-        this.lastSpeedIncreaseScore = 0;
-        this.direction = 'R';
-        this.nextDirection = 'R';
-        this.animationStep = 0;
-        this.bigAppleActive = false;
-        this.activePowerUpItem = null;
-        this.activeEffect = null;
-        this.activeEffectEndTime = 0;
-        this.nextPowerUpThreshold = 8;
-        this.comboCount = 0;
-        this.lastAppleEatTime = 0;
-        this.scoreToBeat = currentHighScore;
-        this.highScoreAnnouncedThisRun = false;
-        this.toastMessage = null;
-        this.particles.clear();
-
-        generateObstacles(currentLevel);
-        setSafeStartingPosition();
-        newApple();
+    /** Buffers up to three turns so quick key combos are never lost or able to reverse the snake. */
+    public void queueDirection(Direction d) {
+        Direction last = inputs.isEmpty() ? dir : inputs.peekLast();
+        if (d == last || d.isOpposite(last) || inputs.size() >= 3) return;
+        inputs.addLast(d);
     }
 
-    public void resetSnakePosition() {
-        setSafeStartingPosition();
-        direction = 'R';
-        nextDirection = 'R';
-        animationStep = 0;
-        newApple();
-    }
+    /** Adds a short "get ready" freeze, e.g. when resuming from pause. */
+    public void addReadyDelay(double ms) { readyMs = Math.max(readyMs, ms); }
 
-    public void setSafeStartingPosition() {
-        // Cap body length on respawn so it fits on screen safely!
-        bodyParts = Math.min(bodyParts, 6);
-        int startX = SCREEN_WIDTH / 2 - (bodyParts * UNIT_SIZE) / 2;
-        int startY = SCREEN_HEIGHT / 2;
-        startX = (startX / UNIT_SIZE) * UNIT_SIZE;
-        startY = (startY / UNIT_SIZE) * UNIT_SIZE;
-        if (startY < PLAY_AREA_MIN_Y) {
-            startY = PLAY_AREA_MIN_Y;
+    // ---------------------------------------------------------------------
+    // Simulation
+    // ---------------------------------------------------------------------
+
+    public void update(double dt) {
+        if (end != EndReason.NONE) return;
+        if (readyMs > 0) {
+            readyMs -= dt;
+            return;
+        }
+        elapsed += dt;
+        appleAge += dt;
+        bigAge += dt;
+        itemAge += dt;
+
+        if (comboLeft > 0) comboLeft -= dt;
+        if (effect != null && effect.durationMs > 0 && (effectLeft -= dt) <= 0) effect = null;
+        if (bigActive && (bigLeft -= dt) <= 0) bigActive = false;
+        if (item != null && (itemLeft -= dt) <= 0) item = null;
+
+        if (mode == GameMode.TIME_ATTACK && (timeLeft -= dt) <= 0) {
+            timeLeft = 0;
+            end = EndReason.TIME_UP;
+            return;
+        }
+        if (mode == GameMode.CHALLENGE) {
+            challengeElapsed += dt;
+            challengeLeft -= dt;
+            if (checkChallenge()) return;
+        }
+        if (stunMs > 0) {
+            stunMs -= dt;
+            return;
         }
 
-        while (isOnObstacle(startX, startY)) {
-            startX += UNIT_SIZE;
-            if (startX >= SCREEN_WIDTH - bodyParts * UNIT_SIZE) {
-                startX = UNIT_SIZE;
-                startY += UNIT_SIZE;
-            }
-            if (startY >= SCREEN_HEIGHT - UNIT_SIZE) {
-                startY = PLAY_AREA_MIN_Y;
-            }
-        }
-
-        for (int i = 0; i < bodyParts; i++) {
-            x[i] = startX + (bodyParts - i - 1) * UNIT_SIZE;
-            y[i] = startY;
-            renderX[i] = x[i];
-            renderY[i] = y[i];
+        stepAcc += dt;
+        double s = stepMs();
+        while (stepAcc >= s && end == EndReason.NONE && readyMs <= 0 && stunMs <= 0) {
+            stepAcc -= s;
+            step();
         }
     }
 
-    public void handleDirectionInput(char newDir) {
-        if (newDir == 'L' && direction != 'R') {
-            nextDirection = 'L';
-        } else if (newDir == 'R' && direction != 'L') {
-            nextDirection = 'R';
-        } else if (newDir == 'U' && direction != 'D') {
-            nextDirection = 'U';
-        } else if (newDir == 'D' && direction != 'U') {
-            nextDirection = 'D';
-        }
-    }
+    private void step() {
+        System.arraycopy(xs, 0, pxs, 0, len);
+        System.arraycopy(ys, 0, pys, 0, len);
+        prevAppleX = appleX;
+        prevAppleY = appleY;
 
-    public boolean move() {
-        animationStep++;
-        boolean fullStepCompleted = false;
+        if (autopilot) dir = think();
+        else if (!inputs.isEmpty()) dir = inputs.pollFirst();
 
-        if (animationStep >= ANIMATION_STEPS) {
-            direction = nextDirection;
-            for (int i = bodyParts - 1; i > 0; i--) {
-                x[i] = x[i - 1];
-                y[i] = y[i - 1];
-            }
-            switch (direction) {
-                case 'U': y[0] -= UNIT_SIZE; break;
-                case 'D': y[0] += UNIT_SIZE; break;
-                case 'L': x[0] -= UNIT_SIZE; break;
-                case 'R': x[0] += UNIT_SIZE; break;
-            }
-            animationStep = 0;
-            fullStepCompleted = true;
+        int nx = xs[0] + dir.dx, ny = ys[0] + dir.dy;
+        boolean outside = nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS;
+        if (outside && wrap) {
+            nx = (nx + COLS) % COLS;
+            ny = (ny + ROWS) % ROWS;
+            outside = false;
         }
 
-        for (int i = 0; i < bodyParts; i++) {
-            double targetX = x[i];
-            double targetY = y[i];
-            double curX = renderX[i];
-            double curY = renderY[i];
-            renderX[i] = curX + (targetX - curX) * ((double) animationStep / ANIMATION_STEPS);
-            renderY[i] = curY + (targetY - curY) * ((double) animationStep / ANIMATION_STEPS);
+        boolean grow = pendingGrowth > 0;
+        boolean hit = outside;
+        if (!hit && effect != PowerUpType.GHOST) {
+            int c = idx(nx, ny);
+            int tail = idx(xs[len - 1], ys[len - 1]);
+            hit = walls[c] || (body[c] > 0 && !(c == tail && !grow && body[c] == 1));
+        }
+        if (hit) {
+            crash(outside ? Math.max(0, Math.min(COLS - 1, nx)) : nx, outside ? Math.max(0, Math.min(ROWS - 1, ny)) : ny);
+            return;
         }
 
-        return fullStepCompleted;
-    }
-
-    /**
-     * Spawns a small apple.
-     * Guaranteed to spawn strictly below PLAY_AREA_MIN_Y so it NEVER interferes with HUD buttons!
-     */
-    public void newApple() {
-        boolean validPosition;
-        int maxTries = 300;
-        int tries = 0;
-        int minGridY = PLAY_AREA_MIN_Y / UNIT_SIZE;
-        int maxGridY = SCREEN_HEIGHT / UNIT_SIZE;
-
-        do {
-            validPosition = true;
-            appleX = random.nextInt(SCREEN_WIDTH / UNIT_SIZE) * UNIT_SIZE;
-            appleY = (minGridY + random.nextInt(maxGridY - minGridY)) * UNIT_SIZE;
-            Rectangle appleRect = new Rectangle(appleX, appleY, UNIT_SIZE, UNIT_SIZE);
-
-            for (Rectangle obstacle : obstacles) {
-                if (obstacle.intersects(appleRect)) {
-                    validPosition = false;
-                    break;
-                }
-            }
-
-            if (validPosition) {
-                for (int i = 0; i < bodyParts; i++) {
-                    if (x[i] == appleX && y[i] == appleY) {
-                        validPosition = false;
-                        break;
-                    }
-                }
-            }
-            tries++;
-        } while (!validPosition && tries < maxTries);
-    }
-
-    /**
-     * Spawns a big apple.
-     * Guaranteed to spawn strictly below PLAY_AREA_MIN_Y!
-     */
-    public void newBigApple() {
-        boolean validPosition;
-        int maxTries = 300;
-        int tries = 0;
-        int minGridY = PLAY_AREA_MIN_Y / UNIT_SIZE;
-        int maxGridY = (SCREEN_HEIGHT - BIG_APPLE_SIZE) / UNIT_SIZE;
-
-        do {
-            validPosition = true;
-            bigAppleX = random.nextInt((SCREEN_WIDTH - BIG_APPLE_SIZE) / UNIT_SIZE) * UNIT_SIZE;
-            bigAppleY = (minGridY + random.nextInt(Math.max(1, maxGridY - minGridY + 1))) * UNIT_SIZE;
-            Rectangle bigAppleRect = new Rectangle(bigAppleX, bigAppleY, BIG_APPLE_SIZE, BIG_APPLE_SIZE);
-
-            for (Rectangle obstacle : obstacles) {
-                if (obstacle.intersects(bigAppleRect)) {
-                    validPosition = false;
-                    break;
-                }
-            }
-            tries++;
-        } while (!validPosition && tries < maxTries);
-
-        bigAppleActive = true;
-        bigAppleStartTime = System.currentTimeMillis();
-    }
-
-    /**
-     * Spawns a special power-up item on the field.
-     */
-    public void spawnPowerUp() {
-        int minGridY = PLAY_AREA_MIN_Y / UNIT_SIZE;
-        int maxGridY = SCREEN_HEIGHT / UNIT_SIZE;
-        int px = random.nextInt(SCREEN_WIDTH / UNIT_SIZE) * UNIT_SIZE;
-        int py = (minGridY + random.nextInt(maxGridY - minGridY)) * UNIT_SIZE;
-
-        PowerUpType[] types = PowerUpType.values();
-        PowerUpType selected = types[random.nextInt(types.length)];
-
-        activePowerUpItem = new PowerUp(selected, px, py);
-    }
-
-    public AppleResult checkApple() {
-        long now = System.currentTimeMillis();
-
-        // Expire active power-up effect
-        if (activeEffect != null && now >= activeEffectEndTime) {
-            activeEffect = null;
-        }
-
-        // Expire on-screen power-up item
-        if (activePowerUpItem != null && activePowerUpItem.isExpired()) {
-            activePowerUpItem = null;
-        }
-
-        // Check timeout for big apple
-        if (bigAppleActive && (now - bigAppleStartTime >= BIG_APPLE_DURATION)) {
-            bigAppleActive = false;
-        }
-
-        // Check power-up collection
-        if (activePowerUpItem != null && x[0] == activePowerUpItem.getX() && y[0] == activePowerUpItem.getY()) {
-            PowerUpType type = activePowerUpItem.getType();
-            activePowerUpItem = null;
-            applyPowerUp(type);
-            spawnParticles(x[0] + UNIT_SIZE / 2, y[0] + UNIT_SIZE / 2, type.getColor());
-            return AppleResult.POWER_UP_COLLECTED;
-        }
-
-        // Check small apple
-        if (!bigAppleActive && x[0] == appleX && y[0] == appleY) {
-            int tailX = x[bodyParts - 1];
-            int tailY = y[bodyParts - 1];
-            bodyParts++;
-            
-            // Combo calculation
-            if (now - lastAppleEatTime <= COMBO_WINDOW_MS) {
-                comboCount++;
-            } else {
-                comboCount = 1;
-            }
-            lastAppleEatTime = now;
-
-            int pointsAwarded = 1 * (activeEffect == PowerUpType.DOUBLE_SCORE ? 2 : 1);
-            if (comboCount > 1) {
-                pointsAwarded += (comboCount - 1);
-                showToast("\u26A1 COMBO x" + comboCount + "! +" + pointsAwarded + " PTS", new Color(255, 215, 0));
-            }
-
-            applesEaten += pointsAwarded;
-            smallApplesCount++;
-            totalSmallApplesEaten++;
-
-            x[bodyParts - 1] = tailX;
-            y[bodyParts - 1] = tailY;
-            renderX[bodyParts - 1] = tailX;
-            renderY[bodyParts - 1] = tailY;
-
-            spawnParticles(appleX + UNIT_SIZE / 2, appleY + UNIT_SIZE / 2, new Color(255, 50, 50));
-            newApple();
-
-            // Spawn Big Apple
-            if (smallApplesCount >= SMALL_APPLES_FOR_BIG) {
-                newBigApple();
-                smallApplesCount = 0;
-            }
-
-            // Occasionally spawn Power-Up
-            if (applesEaten >= nextPowerUpThreshold && activePowerUpItem == null) {
-                spawnPowerUp();
-                nextPowerUpThreshold = applesEaten + 10 + random.nextInt(10);
-            }
-
-            checkHighScoreToast();
-            return AppleResult.SMALL_APPLE_EATEN;
-        }
-
-        // Check big apple
-        if (bigAppleActive) {
-            Rectangle snakeHead = new Rectangle(x[0], y[0], UNIT_SIZE, UNIT_SIZE);
-            Rectangle bigApple = new Rectangle(bigAppleX, bigAppleY, BIG_APPLE_SIZE, BIG_APPLE_SIZE);
-            if (snakeHead.intersects(bigApple)) {
-                int tailX = x[bodyParts - 1];
-                int tailY = y[bodyParts - 1];
-                bodyParts++;
-
-                int points = 5 * (activeEffect == PowerUpType.DOUBLE_SCORE ? 2 : 1);
-                applesEaten += points;
-                showToast("\uD83C\uDF1F BIG BONUS! +" + points + " PTS", new Color(255, 140, 0));
-
-                x[bodyParts - 1] = tailX;
-                y[bodyParts - 1] = tailY;
-                renderX[bodyParts - 1] = tailX;
-                renderY[bodyParts - 1] = tailY;
-
-                spawnParticles(bigAppleX + BIG_APPLE_SIZE / 2, bigAppleY + BIG_APPLE_SIZE / 2, new Color(255, 160, 0));
-                bigAppleActive = false;
-
-                checkHighScoreToast();
-                return AppleResult.BIG_APPLE_EATEN;
-            }
-        }
-
-        return AppleResult.NONE;
-    }
-
-    private void applyPowerUp(PowerUpType type) {
-        if (type == PowerUpType.EXTRA_LIFE) {
-            if (lives < MAX_LIVES) {
-                lives++;
-                showToast("\u2764 EXTRA LIFE! (" + lives + " Lives)", type.getColor());
-            } else {
-                applesEaten += 10;
-                showToast("\u2764 MAX LIVES! +10 BONUS PTS", type.getColor());
-            }
+        if (grow && len < CELLS) {
+            len++;
+            pendingGrowth--;
         } else {
-            activeEffect = type;
-            activeEffectEndTime = System.currentTimeMillis() + type.getDurationMs();
-            showToast("\u2728 " + type.getDisplayName().toUpperCase() + ": " + type.getDescription(), type.getColor());
+            body[idx(xs[len - 1], ys[len - 1])]--;
         }
+        for (int i = len - 1; i > 0; i--) {
+            xs[i] = xs[i - 1];
+            ys[i] = ys[i - 1];
+        }
+        if (grow) {
+            pxs[len - 1] = xs[len - 1];
+            pys[len - 1] = ys[len - 1];
+        }
+        xs[0] = nx;
+        ys[0] = ny;
+        body[idx(nx, ny)]++;
+        maxLength = Math.max(maxLength, len);
+
+        if (effect == PowerUpType.MAGNET) pullApple();
+
+        if (nx == appleX && ny == appleY) eatApple();
+        if (bigActive && nx >= bigX && nx <= bigX + 1 && ny >= bigY && ny <= bigY + 1) eatBig();
+        if (item != null && nx == itemX && ny == itemY) collectItem();
     }
 
-    public CollisionResult checkCollisions() {
-        boolean collided = false;
+    private void eatApple() {
+        combo = comboLeft > 0 ? combo + 1 : 1;
+        comboLeft = COMBO_MS;
+        bestCombo = Math.max(bestCombo, combo);
+        challengeBestCombo = Math.max(challengeBestCombo, combo);
 
-        // Boundaries
-        if (x[0] < 0 || x[0] >= SCREEN_WIDTH || y[0] < 0 || y[0] >= SCREEN_HEIGHT) {
-            collided = true;
+        int pts = 1 + Math.min(combo - 1, 4);
+        if (effect == PowerUpType.DOUBLE_SCORE) pts *= 2;
+        score += pts;
+        applesEaten++;
+        smallSinceBig++;
+        pendingGrowth++;
+        if (mode == GameMode.TIME_ATTACK) timeLeft += 1500;
+        listener.onEat(appleX, appleY, pts, combo, false);
+
+        spawnApple();
+        prevAppleX = appleX;
+        prevAppleY = appleY;
+        int bigEvery = isChallenge(Challenge.Kind.BIG) ? 2 : SMALL_FOR_BIG;
+        if (smallSinceBig >= bigEvery && !bigActive) {
+            spawnBig();
+            smallSinceBig = 0;
         }
-
-        // Self collision
-        if (!collided) {
-            for (int i = bodyParts - 1; i > 0; i--) {
-                if (x[0] == x[i] && y[0] == y[i]) {
-                    collided = true;
-                    break;
-                }
-            }
+        if (item == null && (applesEaten >= nextItemAt || isChallenge(Challenge.Kind.POWER))) {
+            spawnItem();
+            nextItemAt = applesEaten + 6 + rng.nextInt(6);
         }
+        afterScore();
+    }
 
-        // Obstacle collision
-        if (!collided) {
-            for (Rectangle obstacle : obstacles) {
-                if (obstacle.contains(x[0], y[0])) {
-                    collided = true;
-                    break;
-                }
-            }
+    private void eatBig() {
+        int pts = effect == PowerUpType.DOUBLE_SCORE ? 10 : 5;
+        score += pts;
+        bigEaten++;
+        pendingGrowth += 2;
+        bigActive = false;
+        if (mode == GameMode.TIME_ATTACK) timeLeft += 4000;
+        listener.onEat(bigX, bigY, pts, combo, true);
+        afterScore();
+    }
+
+    private void collectItem() {
+        PowerUpType t = item;
+        item = null;
+        powerUps++;
+        if (t == PowerUpType.EXTRA_LIFE) {
+            if (lives < MAX_LIVES) lives++;
+            else score += 10;
+        } else {
+            effect = t;
+            effectLeft = t.durationMs;
         }
+        listener.onPowerUp(t, itemX, itemY);
+        afterScore();
+    }
 
-        if (collided) {
-            // Shield protection: absorbs 1 hit!
-            if (activeEffect == PowerUpType.SHIELD) {
-                activeEffect = null;
-                spawnParticles(x[0] + UNIT_SIZE / 2, y[0] + UNIT_SIZE / 2, new Color(0, 229, 255));
-                showToast("\uD83D\uDEE1\uFE0F SHIELD SHATTERED! Collision Absorbed!", new Color(0, 229, 255));
-                // Bounce back into valid boundary if outside
-                if (x[0] < 0) x[0] = 0;
-                if (x[0] >= SCREEN_WIDTH) x[0] = SCREEN_WIDTH - UNIT_SIZE;
-                if (y[0] < PLAY_AREA_MIN_Y) y[0] = PLAY_AREA_MIN_Y;
-                if (y[0] >= SCREEN_HEIGHT) y[0] = SCREEN_HEIGHT - UNIT_SIZE;
-                return CollisionResult.SHIELD_SAVED;
-            }
+    private void afterScore() {
+        if (!bestAnnounced && bestToBeat > 0 && score > bestToBeat) {
+            bestAnnounced = true;
+            listener.onNewBest(score);
+        }
+        if (level < MAX_LEVEL && score >= (level - startLevel + 1) * POINTS_PER_LEVEL) levelUp();
+    }
 
-            if (gameMode == GameMode.CLASSIC) {
+    private void crash(int cx, int cy) {
+        if (effect == PowerUpType.SHIELD) {
+            effect = null;
+            stunMs = 650;
+            inputs.clear();
+            syncPrev();
+            listener.onShieldBreak(xs[0], ys[0]);
+            return;
+        }
+        switch (mode) {
+            case CLASSIC -> {
                 lives--;
                 if (lives <= 0) {
-                    return CollisionResult.GAME_OVER;
-                } else {
-                    resetSnakePosition();
-                    return CollisionResult.LIFE_LOST;
+                    end = EndReason.OUT_OF_LIVES;
+                    syncPrev();
+                    listener.onCrash(cx, cy, true);
+                    return;
                 }
-            } else if (gameMode == GameMode.ENDLESS) {
-                resetSnakePosition();
-                return CollisionResult.LIFE_LOST;
-            } else if (gameMode == GameMode.CHALLENGE) {
-                return CollisionResult.GAME_OVER;
+                listener.onCrash(cx, cy, false);
+                respawn();
+            }
+            case CHALLENGE -> {
+                end = EndReason.CHALLENGE_FAILED;
+                syncPrev();
+                listener.onCrash(cx, cy, true);
+            }
+            case TIME_ATTACK -> {
+                timeLeft = Math.max(0, timeLeft - CRASH_PENALTY_MS);
+                listener.onCrash(cx, cy, false);
+                respawn();
+            }
+            default -> {
+                listener.onCrash(cx, cy, false);
+                respawn();
             }
         }
-
-        return CollisionResult.NONE;
     }
 
-    public boolean updateSpeed() {
-        int threshold = (applesEaten / POINTS_PER_SPEED_INCREASE) * POINTS_PER_SPEED_INCREASE;
-        if (applesEaten >= lastSpeedIncreaseScore + POINTS_PER_SPEED_INCREASE) {
-            lastSpeedIncreaseScore = threshold;
-            int newDelay = Math.max(MINIMUM_DELAY, currentDelay - DELAY_DECREMENT);
-            if (newDelay != currentDelay) {
-                currentDelay = newDelay;
+    private void respawn() {
+        combo = 0;
+        comboLeft = 0;
+        pendingGrowth = 0;
+        placeSnake();
+        if (!appleOnBoard() || body[idx(appleX, appleY)] > 0) spawnApple();
+        readyMs = autopilot ? 0 : READY_MS * 0.8;
+    }
+
+    private void levelUp() {
+        level++;
+        buildWalls();
+        // Never let a new wall land on, or right in front of, the snake.
+        for (int i = 0; i < len; i++) walls[idx(xs[i], ys[i])] = false;
+        int hx = xs[0], hy = ys[0];
+        for (int k = 1; k <= 3; k++) {
+            int ax = hx + dir.dx * k, ay = hy + dir.dy * k;
+            if (wrap) { ax = (ax + COLS) % COLS; ay = (ay + ROWS) % ROWS; }
+            if (ax >= 0 && ay >= 0 && ax < COLS && ay < ROWS) walls[idx(ax, ay)] = false;
+        }
+        if (!appleOnBoard() || walls[idx(appleX, appleY)]) spawnApple();
+        if (bigActive && !bigFits(bigX, bigY)) bigActive = false;
+        if (item != null && walls[idx(itemX, itemY)]) item = null;
+        syncPrev();
+        stepAcc = 0;
+        inputs.clear();
+        readyMs = autopilot ? 0 : READY_MS;
+        listener.onLevelUp(level);
+    }
+
+    // ---------------------------------------------------------------------
+    // Challenge mode
+    // ---------------------------------------------------------------------
+
+    private void beginChallenge(int i) {
+        challengeIndex = i;
+        Challenge ch = Challenge.ALL.get(i);
+        challengeLeft = ch.seconds() * 1000.0;
+        challengeElapsed = 0;
+        challengeBestCombo = 0;
+        challengeBase = switch (ch.kind()) {
+            case EAT -> applesEaten;
+            case BIG -> bigEaten;
+            case POWER -> powerUps;
+            default -> 0;
+        };
+        if (ch.kind() == Challenge.Kind.BIG && !bigActive) spawnBig();
+        if (ch.kind() == Challenge.Kind.POWER && item == null) spawnItem();
+    }
+
+    /** @return true if the run ended. */
+    private boolean checkChallenge() {
+        Challenge ch = getChallenge();
+        if (getChallengeProgress() >= ch.goal()) {
+            boolean last = challengeIndex == Challenge.ALL.size() - 1;
+            score += 10;
+            listener.onChallengeComplete(challengeIndex, last);
+            if (last) {
+                end = EndReason.CHALLENGES_CLEARED;
                 return true;
             }
+            beginChallenge(challengeIndex + 1);
+        } else if (challengeLeft <= 0) {
+            challengeLeft = 0;
+            end = EndReason.CHALLENGE_FAILED;
+            return true;
         }
         return false;
     }
 
-    public boolean shouldAdvanceLevel() {
-        int nextLevelThreshold = currentLevel * POINTS_PER_LEVEL;
-        return (applesEaten >= nextLevelThreshold && currentLevel < MAX_LEVEL);
+    private boolean isChallenge(Challenge.Kind k) {
+        return mode == GameMode.CHALLENGE && end == EndReason.NONE && getChallenge().kind() == k;
     }
 
-    /**
-     * Advances to the next level smoothly:
-     * Increases level, adds obstacles, safely removes any obstacle overlapping the snake,
-     * and DOES NOT reset the snake onto out-of-bounds coordinates!
-     */
-    public void advanceToNextLevel() {
-        if (currentLevel < MAX_LEVEL) {
-            currentLevel++;
-            generateObstacles(currentLevel);
-            currentDelay = Math.max(MINIMUM_DELAY, baseDelay - (currentLevel - 1) * DELAY_DECREMENT);
+    public Challenge getChallenge() { return Challenge.ALL.get(challengeIndex); }
+    public int getChallengeIndex() { return challengeIndex; }
+    public double getChallengeLeftMs() { return Math.max(0, challengeLeft); }
 
-            // Safely remove any obstacle that happens to overlap the snake's current position
-            // so the player NEVER dies on level up!
-            obstacles.removeIf(obs -> {
-                for (int i = 0; i < bodyParts; i++) {
-                    Rectangle seg = new Rectangle(x[i], y[i], UNIT_SIZE, UNIT_SIZE);
-                    if (obs.intersects(seg)) return true;
-                }
-                return false;
-            });
-
-            // Ensure apple is in a valid spot
-            newApple();
-        }
+    public int getChallengeProgress() {
+        return switch (getChallenge().kind()) {
+            case EAT -> applesEaten - challengeBase;
+            case BIG -> bigEaten - challengeBase;
+            case POWER -> powerUps - challengeBase;
+            case LENGTH -> len;
+            case SURVIVE -> (int) (challengeElapsed / 1000);
+            case COMBO -> challengeBestCombo;
+        };
     }
 
-    public void generateObstacles(int level) {
-        obstacles.clear();
+    // ---------------------------------------------------------------------
+    // Board setup and spawning
+    // ---------------------------------------------------------------------
+
+    private void buildWalls() {
+        Arrays.fill(walls, false);
         if (level >= 2) {
-            // Level 2 corners (below HUD)
-            obstacles.add(new Rectangle(0, PLAY_AREA_MIN_Y, UNIT_SIZE * 2, UNIT_SIZE * 2));
-            obstacles.add(new Rectangle(SCREEN_WIDTH - UNIT_SIZE * 2, SCREEN_HEIGHT - UNIT_SIZE * 2, UNIT_SIZE * 2, UNIT_SIZE * 2));
+            rect(1, 1, 3, 1); rect(1, 1, 1, 3);
+            rect(COLS - 4, 1, 3, 1); rect(COLS - 2, 1, 1, 3);
+            rect(1, ROWS - 2, 3, 1); rect(1, ROWS - 4, 1, 3);
+            rect(COLS - 4, ROWS - 2, 3, 1); rect(COLS - 2, ROWS - 4, 1, 3);
         }
         if (level >= 3) {
-            // Center block
-            int centerX = SCREEN_WIDTH / 2 - UNIT_SIZE;
-            int centerY = SCREEN_HEIGHT / 2 - UNIT_SIZE;
-            obstacles.add(new Rectangle(centerX, centerY, UNIT_SIZE * 2, UNIT_SIZE * 2));
+            rect(10, 3, 12, 1);
+            rect(10, ROWS - 4, 12, 1);
         }
         if (level >= 4) {
-            // Symmetric barriers
-            obstacles.add(new Rectangle(UNIT_SIZE * 5, PLAY_AREA_MIN_Y + UNIT_SIZE * 2, UNIT_SIZE, UNIT_SIZE));
-            obstacles.add(new Rectangle(UNIT_SIZE * 10, PLAY_AREA_MIN_Y + UNIT_SIZE * 5, UNIT_SIZE, UNIT_SIZE));
-            obstacles.add(new Rectangle(UNIT_SIZE * 16, PLAY_AREA_MIN_Y + UNIT_SIZE * 2, UNIT_SIZE, UNIT_SIZE));
+            rect(6, 5, 1, 6);
+            rect(COLS - 7, 5, 1, 6);
         }
         if (level >= 5) {
-            // Side barriers
-            int borderThickness = UNIT_SIZE;
-            obstacles.add(new Rectangle(0, PLAY_AREA_MIN_Y, SCREEN_WIDTH, borderThickness));
-            obstacles.add(new Rectangle(0, SCREEN_HEIGHT - borderThickness, SCREEN_WIDTH, borderThickness));
-            obstacles.add(new Rectangle(0, PLAY_AREA_MIN_Y, borderThickness, SCREEN_HEIGHT - PLAY_AREA_MIN_Y));
-            obstacles.add(new Rectangle(SCREEN_WIDTH - borderThickness, PLAY_AREA_MIN_Y, borderThickness, SCREEN_HEIGHT - PLAY_AREA_MIN_Y));
+            rect(15, 0, 2, 2);
+            rect(15, ROWS - 2, 2, 2);
+            rect(13, 7, 1, 2);
+            rect(18, 7, 1, 2);
         }
-    }
-
-    private boolean isOnObstacle(int px, int py) {
-        Rectangle r = new Rectangle(px, py, UNIT_SIZE, UNIT_SIZE);
-        for (Rectangle obstacle : obstacles) {
-            if (obstacle.intersects(r)) {
-                return true;
+        if (level >= 6) {
+            if (wrap) { // border with portal gaps
+                rect(0, 0, 13, 1); rect(19, 0, 13, 1);
+                rect(0, ROWS - 1, 13, 1); rect(19, ROWS - 1, 13, 1);
+                rect(0, 0, 1, 6); rect(0, 10, 1, 6);
+                rect(COLS - 1, 0, 1, 6); rect(COLS - 1, 10, 1, 6);
+            } else {
+                rect(0, 0, COLS, 1); rect(0, ROWS - 1, COLS, 1);
+                rect(0, 0, 1, ROWS); rect(COLS - 1, 0, 1, ROWS);
             }
         }
-        return false;
+        wallsVersion++;
     }
 
-    private void checkHighScoreToast() {
-        if (!highScoreAnnouncedThisRun && applesEaten > scoreToBeat && scoreToBeat > 0) {
-            highScoreAnnouncedThisRun = true;
-            showToast("\u2605 NEW HIGH SCORE: " + applesEaten + "! \u2605", new Color(255, 215, 0));
+    private void rect(int x, int y, int w, int h) {
+        for (int j = y; j < y + h; j++)
+            for (int i = x; i < x + w; i++)
+                if (i >= 0 && j >= 0 && i < COLS && j < ROWS) walls[idx(i, j)] = true;
+    }
+
+    /** Finds a free horizontal run near the centre with room to move right. */
+    private void placeSnake() {
+        Arrays.fill(body, (byte) 0);
+        len = START_LENGTH;
+        dir = Direction.RIGHT;
+        inputs.clear();
+        int hx = len - 1, hy = 0;
+        search:
+        for (int dr = 0; dr < ROWS; dr++) {
+            int r = ROWS / 2 + ((dr & 1) == 0 ? dr / 2 : -(dr / 2 + 1));
+            if (r < 0 || r >= ROWS) continue;
+            for (int dc = 0; dc < COLS; dc++) {
+                int c = COLS / 2 - 2 + ((dc & 1) == 0 ? dc / 2 : -(dc / 2 + 1));
+                if (c - len + 1 < 0 || c + 5 >= COLS) continue;
+                boolean ok = true;
+                for (int i = c - len + 1; i <= c + 5 && ok; i++) ok = !walls[idx(i, r)];
+                if (ok) {
+                    hx = c;
+                    hy = r;
+                    break search;
+                }
+            }
         }
-    }
-
-    public void showToast(String message, Color color) {
-        this.toastMessage = message;
-        this.toastColor = color;
-        this.toastStartTime = System.currentTimeMillis();
-    }
-
-    public String getToastMessage() {
-        if (toastMessage == null) return null;
-        if (System.currentTimeMillis() - toastStartTime >= TOAST_DURATION) {
-            toastMessage = null;
-            return null;
+        for (int i = 0; i < len; i++) {
+            xs[i] = pxs[i] = hx - i;
+            ys[i] = pys[i] = hy;
+            body[idx(xs[i], ys[i])]++;
         }
-        return toastMessage;
+        stepAcc = 0;
     }
 
-    public float getToastAlpha() {
-        if (toastMessage == null) return 0f;
-        long elapsed = System.currentTimeMillis() - toastStartTime;
-        if (elapsed >= TOAST_DURATION) return 0f;
-        float alpha;
-        if (elapsed < TOAST_FADE_MS) {
-            alpha = elapsed / (float) TOAST_FADE_MS;
-        } else if (elapsed > TOAST_DURATION - TOAST_FADE_MS) {
-            alpha = (TOAST_DURATION - elapsed) / (float) TOAST_FADE_MS;
-        } else {
-            alpha = 1f;
-        }
-        return Math.max(0f, Math.min(1f, alpha));
+    private boolean isFree(int c) {
+        if (walls[c] || body[c] > 0) return false;
+        int x = c % COLS, y = c / COLS;
+        if (x == appleX && y == appleY) return false;
+        if (item != null && x == itemX && y == itemY) return false;
+        return !(bigActive && x >= bigX && x <= bigX + 1 && y >= bigY && y <= bigY + 1);
     }
 
-    public Color getToastColor() {
-        return toastColor;
+    private void spawnApple() {
+        appleX = -100; // so the old position doesn't block itself
+        int n = 0;
+        int head = idx(xs[0], ys[0]);
+        for (int c = 0; c < CELLS; c++) if (isFree(c) && c != head) scratch[n++] = c;
+        if (n == 0) return;
+        int c = scratch[rng.nextInt(n)];
+        appleX = prevAppleX = c % COLS;
+        appleY = prevAppleY = c / COLS;
+        appleAge = 0;
     }
 
-    public void spawnParticles(int px, int py, Color color) {
-        for (int i = 0; i < 14; i++) {
-            double angle = random.nextDouble() * 2 * Math.PI;
-            double speed = random.nextDouble() * 3.5 + 1.2;
-            double dx = Math.cos(angle) * speed;
-            double dy = Math.sin(angle) * speed;
-            particles.add(new Particle(px, py, dx, dy, color));
-        }
+    private boolean bigFits(int x, int y) {
+        if (x < 0 || y < 0 || x + 1 >= COLS || y + 1 >= ROWS) return false;
+        for (int j = 0; j < 2; j++)
+            for (int i = 0; i < 2; i++) {
+                int c = idx(x + i, y + j);
+                if (walls[c] || body[c] > 0 || (x + i == appleX && y + j == appleY)
+                        || (item != null && x + i == itemX && y + j == itemY)) return false;
+            }
+        return true;
     }
 
-    public void updateParticles() {
-        for (int i = particles.size() - 1; i >= 0; i--) {
-            Particle p = particles.get(i);
-            p.update();
-            if (p.isDead()) {
-                particles.remove(i);
+    private void spawnBig() {
+        int n = 0;
+        for (int y = 0; y < ROWS - 1; y++)
+            for (int x = 0; x < COLS - 1; x++)
+                if (bigFits(x, y)) scratch[n++] = idx(x, y);
+        if (n == 0) return;
+        int c = scratch[rng.nextInt(n)];
+        bigX = c % COLS;
+        bigY = c / COLS;
+        bigActive = true;
+        bigLeft = BIG_APPLE_MS;
+        bigAge = 0;
+    }
+
+    private void spawnItem() {
+        PowerUpType[] all = PowerUpType.values();
+        PowerUpType t;
+        do t = all[rng.nextInt(all.length)];
+        while (t == PowerUpType.EXTRA_LIFE && mode != GameMode.CLASSIC);
+        int n = 0;
+        for (int c = 0; c < CELLS; c++) if (isFree(c)) scratch[n++] = c;
+        if (n == 0) return;
+        int c = scratch[rng.nextInt(n)];
+        item = t;
+        itemX = c % COLS;
+        itemY = c / COLS;
+        itemLeft = ITEM_MS;
+        itemAge = 0;
+    }
+
+    private void pullApple() {
+        int dx = xs[0] - appleX, dy = ys[0] - appleY;
+        int dist = Math.abs(dx) + Math.abs(dy);
+        if (dist <= 1 || dist > 7) return;
+        int sx = Integer.signum(dx), sy = Integer.signum(dy);
+        int[][] tries = Math.abs(dx) >= Math.abs(dy)
+            ? new int[][] {{sx, 0}, {0, sy}} : new int[][] {{0, sy}, {sx, 0}};
+        for (int[] t : tries) {
+            if (t[0] == 0 && t[1] == 0) continue;
+            int nx = appleX + t[0], ny = appleY + t[1];
+            int c = idx(nx, ny);
+            if (!walls[c] && body[c] == 0 && !(item != null && nx == itemX && ny == itemY)) {
+                appleX = nx;
+                appleY = ny;
+                return;
             }
         }
     }
 
-    // Power-up & Speed calculation
-    public int getEffectiveDelay() {
-        if (activeEffect == PowerUpType.SLOW_MO) {
-            return (int) (currentDelay * 1.5); // 50% slower for precision control
+    private void syncPrev() {
+        System.arraycopy(xs, 0, pxs, 0, len);
+        System.arraycopy(ys, 0, pys, 0, len);
+        prevAppleX = appleX;
+        prevAppleY = appleY;
+    }
+
+    // ---------------------------------------------------------------------
+    // Autopilot (menu attract mode): greedy toward the apple, avoiding dead ends.
+    // ---------------------------------------------------------------------
+
+    private Direction think() {
+        Direction best = dir;
+        double bestScore = Double.NEGATIVE_INFINITY;
+        int tail = idx(xs[len - 1], ys[len - 1]);
+        for (Direction d : Direction.values()) {
+            if (d.isOpposite(dir)) continue;
+            int nx = xs[0] + d.dx, ny = ys[0] + d.dy;
+            if (wrap) { nx = (nx + COLS) % COLS; ny = (ny + ROWS) % ROWS; }
+            else if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+            int c = idx(nx, ny);
+            if (walls[c] || (body[c] > 0 && c != tail)) continue;
+            double s = -wrapDist(nx, ny, appleX, appleY) + rng.nextDouble() * 0.5;
+            if (reachable(c, len + 4) < len + 4) s -= 1000;
+            if (s > bestScore) {
+                bestScore = s;
+                best = d;
+            }
         }
-        return currentDelay;
+        return best;
     }
 
-    public PowerUp getActivePowerUpItem() {
-        return activePowerUpItem;
+    private int wrapDist(int ax, int ay, int bx, int by) {
+        int dx = Math.abs(ax - bx), dy = Math.abs(ay - by);
+        if (wrap) {
+            dx = Math.min(dx, COLS - dx);
+            dy = Math.min(dy, ROWS - dy);
+        }
+        return dx + dy;
     }
 
-    public PowerUpType getActiveEffect() {
-        return activeEffect;
+    private int reachable(int start, int limit) {
+        stamp++;
+        int head = 0, tailQ = 0, count = 0;
+        scratch[tailQ++] = start;
+        visitStamp[start] = stamp;
+        while (head < tailQ && count < limit) {
+            int c = scratch[head++];
+            count++;
+            int x = c % COLS, y = c / COLS;
+            for (Direction d : Direction.values()) {
+                int nx = x + d.dx, ny = y + d.dy;
+                if (wrap) { nx = (nx + COLS) % COLS; ny = (ny + ROWS) % ROWS; }
+                else if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+                int n = idx(nx, ny);
+                if (visitStamp[n] == stamp || walls[n] || body[n] > 0) continue;
+                visitStamp[n] = stamp;
+                scratch[tailQ++] = n;
+            }
+        }
+        return count;
     }
 
-    public int getActiveEffectRemainingSeconds() {
-        if (activeEffect == null) return 0;
-        long remainingMs = activeEffectEndTime - System.currentTimeMillis();
-        return Math.max(0, (int) (remainingMs / 1000));
+    // ---------------------------------------------------------------------
+    // Accessors
+    // ---------------------------------------------------------------------
+
+    private static int idx(int x, int y) { return y * COLS + x; }
+
+    private boolean appleOnBoard() { return appleX >= 0 && appleY >= 0; }
+
+    /** Milliseconds per grid step at the current level/score/effect. */
+    public double stepMs() {
+        double base = 215 - speedLevel * 15; // 200ms (speed 1) .. 65ms (speed 10)
+        double s = base * Math.pow(0.95, level - 1) - Math.min(30, (score / 15) * 2.0);
+        s = Math.max(45, s);
+        return effect == PowerUpType.SLOW_MO ? s * 1.6 : s;
     }
 
-    // Getters & Setters
-    public int[] getX() { return x; }
-    public int[] getY() { return y; }
-    public double[] getRenderX() { return renderX; }
-    public double[] getRenderY() { return renderY; }
-    public int getBodyParts() { return bodyParts; }
-    public int getApplesEaten() { return applesEaten; }
-    public int getTotalSmallApplesEaten() { return totalSmallApplesEaten; }
-    public int getLives() { return lives; }
-    public int getCurrentLevel() { return currentLevel; }
-    public int getStartingLevel() { return startingLevel; }
-    public int getCurrentDelay() { return currentDelay; }
-    public int getBaseDelay() { return baseDelay; }
-    public void setBaseDelay(int baseDelay) { this.baseDelay = baseDelay; }
-    public int getAppleX() { return appleX; }
-    public int getAppleY() { return appleY; }
-    public boolean isBigAppleActive() { return bigAppleActive; }
-    public int getBigAppleX() { return bigAppleX; }
-    public int getBigAppleY() { return bigAppleY; }
-    public long getBigAppleStartTime() { return bigAppleStartTime; }
-    public char getDirection() { return direction; }
-    public List<Rectangle> getObstacles() { return Collections.unmodifiableList(obstacles); }
-    public List<Particle> getParticles() { return Collections.unmodifiableList(particles); }
-    public GameMode getGameMode() { return gameMode; }
-    public void setGameMode(GameMode mode) { this.gameMode = mode; }
+    /** Interpolation factor between the previous and current grid positions. */
+    public double alpha() {
+        if (readyMs > 0 || stunMs > 0) return 1;
+        return Math.min(1, stepAcc / stepMs());
+    }
+
+    public int[] xs() { return xs; }
+    public int[] ys() { return ys; }
+    public int[] prevXs() { return pxs; }
+    public int[] prevYs() { return pys; }
+    public int length() { return len; }
+    public Direction direction() { return dir; }
+    public boolean isWall(int x, int y) { return walls[idx(x, y)]; }
+    public int wallsVersion() { return wallsVersion; }
+    public boolean isWrap() { return wrap; }
+    public GameMode mode() { return mode; }
+
+    public int appleX() { return appleX; }
+    public int appleY() { return appleY; }
+    public int prevAppleX() { return prevAppleX; }
+    public int prevAppleY() { return prevAppleY; }
+    public double appleAge() { return appleAge; }
+    public boolean bigActive() { return bigActive; }
+    public int bigX() { return bigX; }
+    public int bigY() { return bigY; }
+    public double bigLeftFraction() { return bigLeft / BIG_APPLE_MS; }
+    public double bigAge() { return bigAge; }
+    public PowerUpType item() { return item; }
+    public int itemX() { return itemX; }
+    public int itemY() { return itemY; }
+    public double itemLeftFraction() { return itemLeft / ITEM_MS; }
+    public double itemAge() { return itemAge; }
+    public PowerUpType effect() { return effect; }
+    public double effectLeftFraction() {
+        return effect == null || effect.durationMs == 0 ? 0 : effectLeft / effect.durationMs;
+    }
+
+    public int score() { return score; }
+    public int lives() { return lives; }
+    public int level() { return level; }
+    public int applesEaten() { return applesEaten; }
+    public int bigEaten() { return bigEaten; }
+    public int powerUps() { return powerUps; }
+    public int combo() { return comboLeft > 0 ? combo : 0; }
+    public double comboLeftFraction() { return Math.max(0, comboLeft / COMBO_MS); }
+    public int bestCombo() { return bestCombo; }
+    public int maxLength() { return maxLength; }
+    public double elapsedMs() { return elapsed; }
+    public double timeLeftMs() { return timeLeft; }
+    public double readyMs() { return readyMs; }
+    public boolean isStunned() { return stunMs > 0; }
+    public boolean isOver() { return end != EndReason.NONE; }
+    public EndReason endReason() { return end; }
 }

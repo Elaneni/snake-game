@@ -1,100 +1,41 @@
 package logic;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 
-/**
- * Manages persistent leaderboard scores that survive restarting the game.
- */
-public class LeaderboardManager {
-    private static final String SCORES_DIR = System.getProperty("user.home") + File.separator + ".snakegame";
-    private static final String SCORES_FILE = SCORES_DIR + File.separator + "leaderboard.txt";
-    private static final int MAX_ENTRIES = 10;
+/** Top-10 named runs, read from the {@link Database} and cached between changes. */
+public final class LeaderboardManager {
+    public static final int MAX_ENTRIES = 10;
 
-    private final List<ScoreEntry> scores = new ArrayList<>();
+    private final Database db;
+    private List<Database.ScoreRow> scores;
 
-    public LeaderboardManager() {
-        load();
+    public LeaderboardManager(Database db) {
+        this.db = db;
+        refresh();
     }
 
-    public void load() {
-        scores.clear();
-        File file = new File(SCORES_FILE);
-        if (!file.exists()) {
-            return;
-        }
-
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty()) continue;
-                int sep = line.lastIndexOf('|');
-                if (sep == -1) continue;
-                String name = line.substring(0, sep).trim();
-                try {
-                    int score = Integer.parseInt(line.substring(sep + 1).trim());
-                    if (!name.isEmpty()) {
-                        scores.add(new ScoreEntry(name, score));
-                    }
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        } catch (IOException e) {
-            System.err.println("Could not load leaderboard from " + SCORES_FILE + ": " + e.getMessage());
-        }
-
-        sortAndTrim();
+    private void refresh() {
+        scores = db.topScores(MAX_ENTRIES);
     }
 
-    public void save() {
-        File dir = new File(SCORES_DIR);
-        if (!dir.exists() && !dir.mkdirs()) {
-            System.err.println("Could not create score directory: " + SCORES_DIR);
-            return;
-        }
-
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(SCORES_FILE))) {
-            for (ScoreEntry entry : scores) {
-                String safeName = entry.getName().replace("|", "/").replace("\n", " ").replace("\r", " ");
-                writer.write(safeName + "|" + entry.getScore());
-                writer.newLine();
-            }
-        } catch (IOException e) {
-            System.err.println("Could not save leaderboard to " + SCORES_FILE + ": " + e.getMessage());
-        }
+    /** Names a recorded run and returns its 1-based rank, or -1 if it isn't in the top 10. */
+    public int nameRun(long runId, String name) {
+        db.nameRun(runId, name.isBlank() ? "Player" : name.trim());
+        refresh();
+        for (int i = 0; i < scores.size(); i++) if (scores.get(i).runId() == runId) return i + 1;
+        return -1;
     }
 
-    public void addScore(String name, int score) {
-        scores.add(new ScoreEntry(name, score));
-        sortAndTrim();
-        save();
+    public boolean qualifies(int score) {
+        return score > 0 && (scores.size() < MAX_ENTRIES || score > scores.get(scores.size() - 1).score());
     }
 
-    private void sortAndTrim() {
-        Collections.sort(scores, Comparator.comparingInt(ScoreEntry::getScore).reversed());
-        if (scores.size() > MAX_ENTRIES) {
-            scores.subList(MAX_ENTRIES, scores.size()).clear();
-        }
-    }
-
-    public List<ScoreEntry> getScores() {
+    public List<Database.ScoreRow> getScores() {
         return Collections.unmodifiableList(scores);
     }
 
     public int getHighScore() {
-        return scores.isEmpty() ? 0 : scores.get(0).getScore();
-    }
-
-    public boolean isTopScore(int score) {
-        return score > 0 && (scores.isEmpty() || score > scores.get(0).getScore());
+        return scores.isEmpty() ? 0 : scores.get(0).score();
     }
 }
