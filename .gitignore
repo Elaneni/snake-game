@@ -1,9 +1,0 @@
-*.class
-out/
-*.jar
-*.exe
-*.msi
-*.dmg
-*.deb
-*.rpm
-.snakegame/
