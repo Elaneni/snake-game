@@ -7,7 +7,25 @@ themes, and a persistent leaderboard. Everything, including menus, settings,
 name entry and notifications, is drawn inside the game window. It never opens
 a pop-up dialog.
 
-## Run it
+## Download & install (Windows)
+
+You don't need Java or anything else: both downloads include everything.
+Get them from the repository's **Releases** page.
+
+- **Installer:** `Snake-<version>.exe`. Double-click it and follow the
+  steps. It installs for your user only (no admin password needed) and adds
+  Desktop and Start menu shortcuts. Uninstall it from Settings → Apps.
+- **Portable:** `Snake-<version>-portable.zip`, for when you can't or don't
+  want to install. Unzip it anywhere (even a USB stick) and run `Snake.exe`
+  inside the `Snake` folder.
+
+These files aren't code-signed, so Windows SmartScreen may show "Windows
+protected your PC". Click **More info → Run anyway**.
+
+Your scores and settings are kept in `%USERPROFILE%\.snakegame` either way,
+so they survive reinstalling or switching between the two versions.
+
+## Run it from source
 
 Requires JDK 17 or newer and the H2 database driver in `lib/` (the installer
 script downloads it; or get `h2-2.3.232.jar` from Maven Central).
@@ -110,7 +128,14 @@ To browse the data:
 powershell -ExecutionPolicy Bypass -File build-installer.ps1 [-Version 2.1.0]
 ```
 
-This produces `dist\Snake-<version>.exe`, a single installer that bundles a
-trimmed Java runtime and the H2 driver. It installs per-user (no admin
-needed), adds Desktop and Start menu shortcuts, and upgrades older
-versions in place. Building it requires a JDK and WiX Toolset 3.x.
+This produces two files in `dist\`:
+
+- `Snake-<version>.exe`: a one-click installer that bundles a trimmed Java
+  runtime and the H2 driver. It installs per-user (no admin needed), adds
+  shortcuts, and upgrades older versions in place.
+- `Snake-<version>-portable.zip`: the same app with no installer.
+
+The build machine only needs a JDK 17+. The script downloads the H2 driver
+and the WiX Toolset (used for the `.exe`) by itself into
+`%USERPROFILE%\tools`, verifies their checksums, and needs no admin
+rights. If WiX can't be downloaded, it still builds the portable zip.
